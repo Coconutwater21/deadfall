@@ -3,11 +3,13 @@ import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 
+import 'game_audio.dart';
 import 'high_scores.dart';
 import 'survival_content.dart';
 import 'survival_upgrades.dart';
 import 'survival_world.dart';
 
+export 'game_audio.dart';
 export 'survival_content.dart';
 export 'survival_upgrades.dart';
 export 'survival_world.dart';
@@ -234,12 +236,15 @@ class FirePit {
     this.life = 5.0,
     this.radius = 0.3,
     this.dps = 14,
+    this.friendly = false,
   });
 
   final Offset position;
   double life;
   final double radius;
   final double dps;
+  /// Player-created pits never hurt the player or gun allies.
+  final bool friendly;
 }
 
 enum LaserCannonPhase { charging, firing, relocating, cooldown }
@@ -347,8 +352,8 @@ class GunAlly {
   }) : maxHealth = health;
 
   Offset position;
-  /// Offset from the Commander; kept as the ally moves with them.
-  final Offset formationOffset;
+  /// Offset from the Commander; refreshed each tick to face the nearest enemy.
+  Offset formationOffset;
   double health;
   final double maxHealth;
   double life;
@@ -369,13 +374,19 @@ class SurvivalEngine extends ChangeNotifier {
   static const double healthRegenInterval = 2.0;
   static const double overhealDecayPerSecond = 7;
   /// Damage that must be dealt as Reaper to fill one Soul Bar.
-  static const double soulBarDamageNeeded = 380;
+  static const double soulBarDamageNeeded = 520;
+  /// Soul Bar empties on its own if you stop dealing damage.
+  static const double soulBarDrainPerSecond = 0.12;
 
   /// Screen-space axes mapped into the isometric world.
   static const Offset screenRight = Offset(0.70710678, -0.70710678);
   static const Offset screenDown = Offset(0.70710678, 0.70710678);
 
   final math.Random _random;
+
+  /// Optional SFX hook — wired by the UI's [GameAudio].
+  void Function(AudioCue cue, {WeaponKind? weapon})? onAudioCue;
+
   final List<Zombie> zombies = [];
   final List<SupplyCrate> crates = [];
   final List<BulletTracer> tracers = [];
@@ -420,7 +431,7 @@ class SurvivalEngine extends ChangeNotifier {
   bool paused = false;
   /// When false, loot unlocks/upgrades a gun without switching to it.
   bool autoEquipNewWeapons = false;
-  /// Cutscene: only Necromancer + minions survived for 20s.
+  /// Cutscene: only Necromancer + minions survived for 2s.
   bool badEndingCutscene = false;
   /// Ascended Necromancer fight is underway.
   bool badEndingActive = false;
@@ -487,6 +498,16 @@ class SurvivalEngine extends ChangeNotifier {
   double _aftershockTimer = 0;
   double _aftershockRadius = 0;
   double _aftershockDamage = 0;
+  /// SMG mastery: temporary fire-rate frenzy after kills.
+  double _stormTimer = 0;
+  /// Minigun mastery heat (0–1), builds while firing.
+  double _weaponHeat = 0;
+  /// Bow mastery: branded prey takes bonus damage.
+  int? _hunterMarkId;
+  double _hunterMarkTimer = 0;
+  /// Launcher mastery: delayed cluster bombs.
+  final List<({Offset at, double timer, double radius, int damage, Color color})>
+      _clusterBombs = [];
   /// Seconds with only Necromancer + his minions left (good-ending trigger).
   double _necroSoloTimer = 0;
   double _ascendedMiniSpawnTimer = 0;
@@ -581,8 +602,16 @@ class SurvivalEngine extends ChangeNotifier {
         SurvivalUpgrades.weaponDamageMult(weaponLevel(weapon));
     if (classMastered &&
         playerClass == PlayerClass.berserker &&
-        health <= maxHealth * 0.5) {
-      dmg *= 1.4;
+        health <= maxHealth * 0.6) {
+      dmg *= 2.0;
+    }
+    if (classMastered && playerClass == PlayerClass.ranger) {
+      dmg *= 1.35;
+    }
+    if (weaponMastered &&
+        weapon.mastery == WeaponMastery.overheat &&
+        _weaponHeat > 0.2) {
+      dmg *= 1.0 + _weaponHeat * 1.4;
     }
     return dmg;
   }
@@ -695,6 +724,11 @@ class SurvivalEngine extends ChangeNotifier {
     _aftershockTimer = 0;
     _aftershockRadius = 0;
     _aftershockDamage = 0;
+    _stormTimer = 0;
+    _weaponHeat = 0;
+    _hunterMarkId = null;
+    _hunterMarkTimer = 0;
+    _clusterBombs.clear();
     _necroSoloTimer = 0;
     _ascendedMiniSpawnTimer = 0;
     _scoreRecorded = false;
@@ -902,34 +936,125 @@ class SurvivalEngine extends ChangeNotifier {
     totalKills++;
     _earnMoney(zombie.reward);
     _onMasteryKill(zombie);
+    if (zombie.kind == ZombieKind.exploder ||
+        zombie.kind == ZombieKind.bloater) {
+      _sfx(AudioCue.explosion);
+    } else if (zombie.kind.isBoss || zombie.isAscendedNecromancer) {
+      _sfx(AudioCue.deathBoss);
+    } else if (zombie.kind.isMiniBoss) {
+      _sfx(AudioCue.deathMiniBoss);
+    } else {
+      _sfx(AudioCue.kill);
+    }
   }
 
   void _onMasteryKill(Zombie zombie) {
     if (classMastered) {
       switch (playerClass) {
         case PlayerClass.survivor:
-          _heal(10);
+          _heal((maxHealth * 0.22).round().clamp(22, 80));
         case PlayerClass.scout:
-          _speedBuffTimer = math.max(_speedBuffTimer, 1.25);
-          _speedBuffMult = math.max(_speedBuffMult, 1.55);
+          _speedBuffTimer = math.max(_speedBuffTimer, 2.4);
+          _speedBuffMult = math.max(_speedBuffMult, 1.95);
+          _invulnTimer = math.max(_invulnTimer, 0.55);
         case PlayerClass.reaper:
-          _addSoulCharge(55, mult: 1.4);
+          _addSoulCharge(45, mult: 1.15);
+        case PlayerClass.tank:
+          _heal(8);
         default:
           break;
       }
     }
-    if (weaponMastered && weapon.ignites) {
-      firePits.add(FirePit(
-        zombie.position,
-        life: 2.4,
-        radius: 0.26,
-        dps: 22 + wave * 0.35,
-      ));
+    if (!weaponMastered) return;
+    switch (weapon.mastery) {
+      case WeaponMastery.storm:
+        _stormTimer = math.max(_stormTimer, 2.8);
+        _shotCooldown = 0;
+      case WeaponMastery.inferno:
+        firePits.add(FirePit(
+          zombie.position,
+          life: 5.5,
+          radius: 0.42,
+          dps: 55 + wave * 0.9,
+          friendly: true,
+        ));
+        // Spread inferno to nearby corpses of combat.
+        for (final other in zombies) {
+          if (other.id == zombie.id) continue;
+          if (_wrappedDelta(zombie.position, other.position).distance > 0.55) {
+            continue;
+          }
+          _applyBurn(other, duration: 5.0, dps: 48);
+        }
+      case WeaponMastery.brand:
+        // Branded kill detonates a seeking shard nova.
+        _masteryPulseAt(zombie.position, 0.7, effectiveWeaponDamage * 1.1);
+      case WeaponMastery.ricochet:
+        _heal(3);
+      case WeaponMastery.overheat:
+        final mag = magazine[weapon] ?? 0;
+        magazine[weapon] = math.min(magazineSize, mag + 4);
+      default:
+        break;
     }
   }
 
   void setMovement(Offset value) => _moveInput = value;
   void setFiring(bool value) => _firing = value;
+
+  void _sfx(AudioCue cue, {WeaponKind? weapon}) =>
+      onAudioCue?.call(cue, weapon: weapon);
+
+  /// True while any mini-boss, boss, or ascended necro is alive.
+  bool get hasLivingElite => zombies.any(
+        (z) =>
+            z.kind.isBoss ||
+            z.kind.isMiniBoss ||
+            z.isAscendedNecromancer,
+      );
+
+  /// Pick elite BGM from the current wave / living bosses.
+  ///
+  /// Decade waves (10, 20, 30…) get escalating milestone themes. Mini-boss
+  /// waves keep the generic boss bed. Bad ending uses the wave-50+ apex track.
+  GameMusic get eliteMusicTrack {
+    var hasRonin = false;
+    var hasCitadelFight = false;
+    var hasOtherElite = false;
+    for (final z in zombies) {
+      if (z.kind == ZombieKind.shadowRonin) {
+        hasRonin = true;
+      } else if (z.kind == ZombieKind.citadelTower ||
+          z.kind == ZombieKind.apocalypseLord) {
+        hasCitadelFight = true;
+      } else if (z.kind.isBoss ||
+          z.kind.isMiniBoss ||
+          z.isAscendedNecromancer) {
+        hasOtherElite = true;
+      }
+    }
+    final hasElite =
+        hasRonin || hasCitadelFight || hasOtherElite || badEndingCutscene;
+
+    if (badEndingActive) return GameMusic.bossW50;
+    if (!hasElite) return GameMusic.none;
+
+    // Decade milestone fights: theme scales with wave tier forever.
+    if (wave >= 10 && wave % 10 == 0) {
+      return switch (wave ~/ 10) {
+        1 => GameMusic.bossCitadel,
+        2 => GameMusic.bossRonin,
+        3 => GameMusic.bossW30,
+        4 => GameMusic.bossW40,
+        _ => GameMusic.bossW50, // 50, 60, 70…
+      };
+    }
+
+    // Off-decade elites (mini-bosses, void on 25, etc.).
+    if (hasRonin) return GameMusic.bossRonin;
+    if (hasCitadelFight) return GameMusic.bossCitadel;
+    return GameMusic.boss;
+  }
 
   void setAim(Offset worldPoint) {
     final delta = worldPoint - player;
@@ -1246,11 +1371,11 @@ class SurvivalEngine extends ChangeNotifier {
       case PlayerClass.survivor:
         _speedBuffTimer = 4.5 * abilityPower;
         _speedBuffMult = 1.55 + (abilityPower - 1) * 0.35;
-        _heal((18 * abilityPower).round());
+        _heal(((abilityMastered ? 48 : 18) * abilityPower).round());
         if (abilityMastered) {
-          _masteryPulseNearby(0.85, 55 * abilityPower);
+          _masteryPulseNearby(1.35, 140 * abilityPower);
         }
-        _showMessage(abilityMastered ? 'ADRENALINE + RALLY' : 'ADRENALINE');
+        _showMessage(abilityMastered ? 'NOVA RALLY' : 'ADRENALINE');
       case PlayerClass.scout:
         final from = player;
         player = _moveWithCollision(
@@ -1266,14 +1391,14 @@ class SurvivalEngine extends ChangeNotifier {
           life: 0.18,
         ));
         if (abilityMastered) {
-          _damageAlongSegment(from, player, 70 * abilityPower, 0.22);
+          _damageAlongSegment(from, player, 180 * abilityPower, 0.32);
         }
-        _showMessage(abilityMastered ? 'BLADE DASH' : 'DASH');
+        _showMessage(abilityMastered ? 'GUILLOTINE DASH' : 'DASH');
       case PlayerClass.tank:
         _pushNearbyEnemies(
           distance: 0.95 * abilityPower,
           force: 0.62 * abilityPower,
-          damage: abilityMastered ? 35 * abilityPower : 0,
+          damage: abilityMastered ? 95 * abilityPower : 0,
         );
         _invulnTimer = 1.85 * abilityPower;
         _vanguardSecondPushTimer = 1.85 * abilityPower;
@@ -1283,25 +1408,28 @@ class SurvivalEngine extends ChangeNotifier {
           radius: 0.9,
           life: 0.28,
         ));
-        _showMessage(abilityMastered ? 'SHOCK BASH' : 'SHOCK BASH');
+        _showMessage(abilityMastered ? 'SEISMIC BASH' : 'SHOCK BASH');
       case PlayerClass.assault:
-        _overdriveTimer = 5.0 * abilityPower;
+        _overdriveTimer = (abilityMastered ? 8.0 : 5.0) * abilityPower;
         if (abilityMastered) {
           magazine[weapon] = magazineSize;
+          _reloadTimer = 0;
         }
-        _showMessage(abilityMastered ? 'OVERDRIVE + RELOAD' : 'OVERDRIVE');
+        _showMessage(abilityMastered ? 'FULL AUTO RESET' : 'OVERDRIVE');
       case PlayerClass.berserker:
         _damageBuffTimer = 5.0 * abilityPower;
-        _damageBuffMult = 2.1 + (abilityPower - 1) * 0.4;
+        _damageBuffMult =
+            (abilityMastered ? 2.8 : 2.1) + (abilityPower - 1) * 0.4;
         _speedBuffTimer = 5.0 * abilityPower;
         _speedBuffMult = 1.4 + (abilityPower - 1) * 0.25;
         if (abilityMastered) {
-          _heal((28 * abilityPower).round());
+          _heal((55 * abilityPower).round());
+          _invulnTimer = math.max(_invulnTimer, 1.1);
         }
-        _showMessage(abilityMastered ? 'BLOOD PACT' : 'BLOOD RAGE');
+        _showMessage(abilityMastered ? 'CRIMSON ASCENSION' : 'BLOOD RAGE');
       case PlayerClass.reaper:
         final duration =
-            (5.8 * abilityPower) * (abilityMastered ? 1.35 : 1.0);
+            (4.2 * abilityPower) * (abilityMastered ? 1.35 : 1.0);
         _scytheTimer = math.max(_scytheTimer, duration);
         _scytheSwingPhase = 0;
         _scytheSwingDir = 1;
@@ -1309,13 +1437,14 @@ class SurvivalEngine extends ChangeNotifier {
         _scytheAttackProgress = 0;
         _scytheHitIds.clear();
         _speedBuffTimer = math.max(_speedBuffTimer, duration);
-        _speedBuffMult = math.max(_speedBuffMult, 1.18);
+        _speedBuffMult = math.max(_speedBuffMult, 1.08);
         _reloadTimer = 0;
         if (abilityMastered) {
           _reaperOpeningCleave();
+          _masteryPulseNearby(0.85, 70 * abilityPower);
         }
         _showMessage(
-          abilityMastered ? 'REAPER\'S WAKE' : 'SOUL SCYTHE',
+          abilityMastered ? 'HARVEST APOCALYPSE' : 'SOUL SCYTHE',
         );
       case PlayerClass.demolitions:
         final impact = _wrap(player + aimDirection * 1.5);
@@ -1327,16 +1456,18 @@ class SurvivalEngine extends ChangeNotifier {
           playerClass.color,
         );
         if (abilityMastered) {
-          final impact2 = _wrap(player + aimDirection * 2.2);
-          _detonateWeaponBlast(
-            impact2,
-            (100 * abilityPower).round(),
-            radius * 0.85,
-            playerClass.color,
-          );
+          for (final dist in [2.0, 2.7]) {
+            final impactN = _wrap(player + aimDirection * dist);
+            _detonateWeaponBlast(
+              impactN,
+              (120 * abilityPower).round(),
+              radius * 0.95,
+              playerClass.color,
+            );
+          }
         }
         _cullDeadZombies();
-        _showMessage(abilityMastered ? 'TWIN SATCHELS' : 'SATCHEL');
+        _showMessage(abilityMastered ? 'TRIPLE PAYLOAD' : 'SATCHEL');
       case PlayerClass.ghost:
         final from = player;
         _invulnTimer = 1.6 * abilityPower;
@@ -1346,9 +1477,9 @@ class SurvivalEngine extends ChangeNotifier {
           radius: 0.055,
         );
         if (abilityMastered) {
-          _damageAlongSegment(from, player, 85 * abilityPower, 0.2);
+          _damageAlongSegment(from, player, 200 * abilityPower, 0.28);
         }
-        _showMessage(abilityMastered ? 'RIFT SHIFT' : 'PHASE SHIFT');
+        _showMessage(abilityMastered ? 'RIFT GUILLOTINE' : 'PHASE SHIFT');
       case PlayerClass.juggernaut:
         var hit = 0;
         final radius = 1.1 + (abilityPower - 1) * 0.2;
@@ -1363,13 +1494,15 @@ class SurvivalEngine extends ChangeNotifier {
         }
         blastFlashes.add(BlastFlash(player, playerClass.color, radius: radius));
         if (abilityMastered) {
-          _aftershockTimer = 0.45;
-          _aftershockRadius = radius * 0.9;
-          _aftershockDamage = dmg * 0.7;
+          _aftershockTimer = 0.4;
+          _aftershockRadius = radius * 1.05;
+          _aftershockDamage = dmg * 0.95;
         }
         _cullDeadZombies();
         _showMessage(
-          abilityMastered ? 'SHOCKWAVE + AFTERSHOCK ($hit)' : 'SHOCKWAVE ($hit)',
+          abilityMastered
+              ? 'TECTONIC AFTERSHOCK ($hit)'
+              : 'SHOCKWAVE ($hit)',
         );
       case PlayerClass.ranger:
         final beamRange =
@@ -1388,21 +1521,21 @@ class SurvivalEngine extends ChangeNotifier {
           strokeWidth: 5.5,
           life: 0.2,
         ));
-        final shot = 320 * abilityPower;
+        final shot = (abilityMastered ? 480 : 320) * abilityPower;
         for (final hit in hits) {
           if (_tryBlockDamage(hit.zombie)) continue;
           hit.zombie.health -= shot * hit.zombie.kind.damageTakenFactor;
           hit.zombie.hitFlash = 0.14;
           if (abilityMastered) {
-            _applySlow(hit.zombie, duration: 2.8, factor: 0.38);
+            _applySlow(hit.zombie, duration: 4.5, factor: 0.18);
           }
         }
         _cullDeadZombies();
-        _showMessage(abilityMastered ? 'FROST MARKED SHOT' : 'MARKED SHOT');
+        _showMessage(abilityMastered ? 'GLACIAL ERASURE' : 'MARKED SHOT');
       case PlayerClass.commander:
         // Fresh squad rings up around the Commander.
         gunAllies.clear();
-        final count = abilityMastered ? 4 : 3;
+        final count = abilityMastered ? 5 : 3;
         final slots = _gunlineFormationOffsets(count);
         for (var i = 0; i < count; i++) {
           final offset = slots[i];
@@ -1410,7 +1543,7 @@ class SurvivalEngine extends ChangeNotifier {
           gunAllies.add(GunAlly(
             position: at,
             formationOffset: offset,
-            health: 110 + wave * 5.0 + (abilityMastered ? 50 : 0),
+            health: 110 + wave * 5.0 + (abilityMastered ? 120 : 0),
             life: 22 * abilityPower,
           ));
           blastFlashes.add(BlastFlash(
@@ -1420,10 +1553,11 @@ class SurvivalEngine extends ChangeNotifier {
             life: 0.28,
           ));
         }
-        _showMessage(abilityMastered ? 'ELITE GUNLINE' : 'GUNLINE');
+        _showMessage(abilityMastered ? 'DEATH SQUAD' : 'GUNLINE');
     }
 
     _abilityCooldown = abilityCooldownMax;
+    _sfx(AudioCue.ability);
     notifyListeners();
     return true;
   }
@@ -1464,9 +1598,10 @@ class SurvivalEngine extends ChangeNotifier {
     _reloadTimer = effectiveReloadSeconds;
     _firing = false;
     if (classMastered && playerClass == PlayerClass.ghost) {
-      _invulnTimer = math.max(_invulnTimer, 0.55);
+      _invulnTimer = math.max(_invulnTimer, 1.45);
     }
     if (!auto) _showMessage('RELOADING...');
+    _sfx(AudioCue.reload);
     notifyListeners();
     return true;
   }
@@ -1490,7 +1625,7 @@ class SurvivalEngine extends ChangeNotifier {
         _pushNearbyEnemies(
           distance: 1.05 * abilityPower,
           force: 0.78 * abilityPower,
-          damage: abilityMastered ? 55 * abilityPower : 18 * abilityPower,
+          damage: abilityMastered ? 130 * abilityPower : 18 * abilityPower,
         );
         blastFlashes.add(BlastFlash(
           player,
@@ -1508,6 +1643,7 @@ class SurvivalEngine extends ChangeNotifier {
     _scytheTimer = math.max(0, _scytheTimer - dt);
     _tickSoulScythe(dt);
     _lootHintTimer = math.max(0, _lootHintTimer - dt);
+    _tickSoulBar(dt);
     _tickMasteryTimers(dt);
     if (_speedBuffTimer <= 0) _speedBuffMult = 1;
     if (_damageBuffTimer <= 0) _damageBuffMult = 1;
@@ -1707,13 +1843,66 @@ class SurvivalEngine extends ChangeNotifier {
     health = math.max(maxHealth, health - lose);
   }
 
+  void _tickSoulBar(double dt) {
+    if (playerClass != PlayerClass.reaper || gameOver) return;
+    if (_soulCharge <= 0) {
+      _soulCharge = 0;
+      return;
+    }
+    _soulCharge = math.max(0, _soulCharge - soulBarDrainPerSecond * dt);
+  }
+
+  /// Flat heal when a Soul Bar fills — scales with Reaper class level.
+  int get soulSurgeHealAmount {
+    final level = classLevel(PlayerClass.reaper);
+    final base = 18 + level * 12; // L0=18 … L5=78
+    return classMastered ? base + 15 : base;
+  }
+
   void _tickMasteryTimers(double dt) {
+    if (_stormTimer > 0) _stormTimer = math.max(0, _stormTimer - dt);
+    if (_hunterMarkTimer > 0) {
+      _hunterMarkTimer = math.max(0, _hunterMarkTimer - dt);
+      if (_hunterMarkTimer <= 0) _hunterMarkId = null;
+    }
+    if (_weaponHeat > 0 &&
+        !(weaponMastered &&
+            weapon.mastery == WeaponMastery.overheat &&
+            _firing)) {
+      _weaponHeat = math.max(0, _weaponHeat - dt * 0.55);
+    }
+    if (_clusterBombs.isNotEmpty) {
+      for (var i = _clusterBombs.length - 1; i >= 0; i--) {
+        final bomb = _clusterBombs[i];
+        final next = bomb.timer - dt;
+        if (next <= 0) {
+          _detonateWeaponBlast(
+            bomb.at,
+            bomb.damage,
+            bomb.radius,
+            bomb.color,
+            ignite: weapon.ignites,
+          );
+          _clusterBombs.removeAt(i);
+        } else {
+          _clusterBombs[i] = (
+            at: bomb.at,
+            timer: next,
+            radius: bomb.radius,
+            damage: bomb.damage,
+            color: bomb.color,
+          );
+        }
+      }
+      if (_clusterBombs.isNotEmpty) _cullDeadZombies();
+    }
+
     if (classMastered && playerClass == PlayerClass.juggernaut) {
       _masteryPulseTimer -= dt;
       if (_masteryPulseTimer <= 0) {
-        _masteryPulseTimer = 6.5;
+        _masteryPulseTimer = 3.2;
         if (zombies.isNotEmpty) {
-          _masteryPulseNearby(0.75, 28 + wave * 0.6);
+          _masteryPulseNearby(1.15, 70 + wave * 1.4);
           _cullDeadZombies();
         }
       }
@@ -1739,15 +1928,20 @@ class SurvivalEngine extends ChangeNotifier {
   }
 
   void _masteryPulseNearby(double radius, double damage) {
+    _masteryPulseAt(player, radius, damage);
+  }
+
+  void _masteryPulseAt(Offset center, double radius, double damage) {
     if (radius <= 0 || damage <= 0) return;
     for (final zombie in List<Zombie>.from(zombies)) {
-      if (_wrappedDelta(player, zombie.position).distance > radius) continue;
+      if (_wrappedDelta(center, zombie.position).distance > radius) continue;
       if (_tryBlockDamage(zombie)) continue;
       zombie.health -= damage * zombie.kind.damageTakenFactor;
       zombie.hitFlash = 0.1;
+      _spawnDamageFloater(zombie.position, damage * zombie.kind.damageTakenFactor);
     }
     blastFlashes.add(BlastFlash(
-      player,
+      center,
       playerClass.color,
       radius: radius,
       life: 0.22,
@@ -1837,14 +2031,15 @@ class SurvivalEngine extends ChangeNotifier {
       _necroSoloTimer += dt;
       if (before < 0.05 && _necroSoloTimer >= 0.05) {
         _showMessage('THE DEAD GO QUIET...');
-      } else if (before < 10 && _necroSoloTimer >= 10) {
+      } else if (before < 1 && _necroSoloTimer >= 1) {
         _showMessage('SOMETHING STIRS...');
       }
-      if (_necroSoloTimer >= 20) {
+      if (_necroSoloTimer >= 2) {
         _necroSoloTimer = 0;
         badEndingCutscene = true;
         paused = true;
         _showMessage('THE BAD ENDING');
+        _sfx(AudioCue.bossAlert);
       }
     } else {
       _necroSoloTimer = 0;
@@ -1897,6 +2092,7 @@ class SurvivalEngine extends ChangeNotifier {
     _ascendedMiniSpawnTimer = 8;
     waveBannerTimer = 3.2;
     _showMessage('THE BAD ENDING — EVERY BOSS AWAKENS');
+    _sfx(AudioCue.bossAlert);
     notifyListeners();
   }
 
@@ -1906,11 +2102,13 @@ class SurvivalEngine extends ChangeNotifier {
     waveBannerTimer = 2.4;
     _remainingToSpawn = 6 + wave * 3;
     if (wave % 5 == 0) _remainingToSpawn += 4;
+    var eliteSpawned = false;
 
     if (wave % 20 == 0) {
       _spawnZombie(forcedKind: ZombieKind.shadowRonin, at: Offset.zero);
       _remainingToSpawn = math.max(4, _remainingToSpawn ~/ 2);
       _showMessage('SHADOW RONIN HAS ENTERED THE ARENA');
+      eliteSpawned = true;
     }
     if (wave % 10 == 0) {
       _spawnZombie(forcedKind: ZombieKind.citadelTower, at: Offset.zero);
@@ -1919,6 +2117,7 @@ class SurvivalEngine extends ChangeNotifier {
       _showMessage(tier <= 1
           ? 'CITADEL RISES AT THE CENTER'
           : 'CITADEL MARK $tier RISES — STRONGER & FASTER');
+      eliteSpawned = true;
     } else if (wave % 5 == 0) {
       // Blazeburst debuts at wave 15, then joins the every-5 rotation.
       final mini = wave < 15
@@ -1937,16 +2136,19 @@ class SurvivalEngine extends ChangeNotifier {
       _showMessage(wave == 15 && mini == ZombieKind.blazeburst
           ? 'BLAZEBURST IGNITES THE ARENA'
           : 'MINI-BOSS: ${mini.label.toUpperCase()}');
+      eliteSpawned = true;
     }
 
     // Laser Overseer: debut waves 11–12, then packs of 2+ from 15 / every 5.
     if (wave == 11 || wave == 12) {
       _spawnZombie(forcedKind: ZombieKind.laserOverseer);
       _showMessage('LASER OVERSEER DEPLOYS CANNONS');
+      eliteSpawned = true;
     } else if (wave >= 15 && wave % 5 == 0) {
       _spawnZombie(forcedKind: ZombieKind.laserOverseer);
       _spawnZombie(forcedKind: ZombieKind.laserOverseer);
       _showMessage('DUAL LASER OVERSEERS — CANNONS ONLINE');
+      eliteSpawned = true;
     }
 
     // Void Sovereign: wave 21 debut, then every 25 waves.
@@ -1954,7 +2156,9 @@ class SurvivalEngine extends ChangeNotifier {
       _spawnZombie(forcedKind: ZombieKind.voidSovereign, at: Offset.zero);
       _remainingToSpawn = math.max(3, _remainingToSpawn ~/ 2);
       _showMessage('VOID SOVEREIGN DESCENDS — DODGE EVERYTHING');
+      eliteSpawned = true;
     }
+    _sfx(eliteSpawned ? AudioCue.bossAlert : AudioCue.wave);
     _spawnTimer = 0;
   }
 
@@ -2287,6 +2491,15 @@ class SurvivalEngine extends ChangeNotifier {
     final forward = _nearestEnemyDirection();
     final right = Offset(-forward.dy, forward.dx);
     const depth = 0.78;
+    if (count >= 5) {
+      return [
+        forward * depth + right * -0.70,
+        forward * depth + right * -0.35,
+        forward * depth,
+        forward * depth + right * 0.35,
+        forward * depth + right * 0.70,
+      ];
+    }
     if (count >= 4) {
       return [
         forward * depth + right * -0.58,
@@ -2403,17 +2616,23 @@ class SurvivalEngine extends ChangeNotifier {
 
   void _updateGunAllies(double dt) {
     final fireRate = classMastered && playerClass == PlayerClass.commander
-        ? 0.22
+        ? 0.12
         : 0.36;
     final dmgMult = abilityMastered && playerClass == PlayerClass.commander
-        ? 1.45
+        ? 2.1
         : 1.0;
-    for (final ally in gunAllies) {
+    // Re-face the nearest enemy every tick so the line always aims as a unit.
+    final slots = _gunlineFormationOffsets(gunAllies.length);
+    for (var i = 0; i < gunAllies.length; i++) {
+      final ally = gunAllies[i];
+      if (i < slots.length) {
+        ally.formationOffset = slots[i];
+      }
       ally.life -= dt;
       ally.fireCooldown = math.max(0, ally.fireCooldown - dt);
       ally.hitFlash = math.max(0, ally.hitFlash - dt);
 
-      // Hold the spawn formation relative to the Commander.
+      // Hold the formation slot relative to the Commander.
       final desired = _wrap(player + ally.formationOffset);
       final toSlot = _wrappedDelta(ally.position, desired);
       if (toSlot.distance > 0.001) {
@@ -3544,14 +3763,15 @@ class SurvivalEngine extends ChangeNotifier {
           return;
         }
         final launchDir = dist > 0.01 ? facing : const Offset(0, -1);
+        // Slightly slower than the player so strafing can shake them.
         final launchSpeed =
-            effectiveMoveSpeed * _speedBuffMult * gooSlowFactor;
+            effectiveMoveSpeed * _speedBuffMult * gooSlowFactor * 0.82;
         enemyBolts.add(EnemyBolt(
           position: zombie.position + launchDir * 0.14,
           velocity: launchDir * launchSpeed,
           damage: 16 + wave * 0.55,
           color: const Color(0xFFFF8F00),
-          radius: 0.055,
+          radius: 0.032,
           life: 18.0,
           style: EnemyBoltStyle.missile,
           ownerId: zombie.id,
@@ -4221,23 +4441,44 @@ class SurvivalEngine extends ChangeNotifier {
           bolt.life = 0;
           continue;
         }
-        // Match the player's current move speed (buffs + goo included).
+        // Soft homing: limited turn rate + slightly under player speed.
         final seekSpeed =
-            effectiveMoveSpeed * _speedBuffMult * gooSlowFactor;
+            effectiveMoveSpeed * _speedBuffMult * gooSlowFactor * 0.82;
         final toPlayer = _wrappedDelta(bolt.position, player);
         if (toPlayer.distance > 1e-5) {
-          final dir = toPlayer / toPlayer.distance;
-          bolt.velocity = dir * seekSpeed;
+          final desired = toPlayer / toPlayer.distance;
+          final speed = bolt.velocity.distance;
+          final current = speed > 1e-5
+              ? Offset(bolt.velocity.dx / speed, bolt.velocity.dy / speed)
+              : desired;
+          // ~1.6 rad/s turn — easy to dodge by circling.
+          final turn = (1.6 * dt).clamp(0.0, 0.28);
+          var blended = Offset(
+            current.dx + (desired.dx - current.dx) * turn,
+            current.dy + (desired.dy - current.dy) * turn,
+          );
+          final bLen = blended.distance;
+          if (bLen > 1e-5) blended = blended / bLen;
+          bolt.velocity = blended * seekSpeed;
         }
-        // Missiles chase until impact / firer death; don't time out harmlessly.
+        // Missiles chase until impact / firer death / solid hit.
         bolt.life = math.max(bolt.life, 1.0);
       } else {
         bolt.life -= dt;
       }
       final next = bolt.position + bolt.velocity * dt;
-      // Knives (and harpoons) are physical — they stop on walls/props.
-      if (bolt.style == EnemyBoltStyle.knife &&
+      // Knives and missiles are physical — they stop on walls/props.
+      if ((bolt.style == EnemyBoltStyle.knife ||
+              bolt.style == EnemyBoltStyle.missile) &&
           _segmentHitsCover(bolt.position, next)) {
+        if (bolt.style == EnemyBoltStyle.missile) {
+          blastFlashes.add(BlastFlash(
+            bolt.position,
+            const Color(0xFF90A4AE),
+            radius: 0.14,
+            life: 0.16,
+          ));
+        }
         bolt.life = 0;
       } else {
         bolt.position = _wrap(next);
@@ -4415,6 +4656,7 @@ class SurvivalEngine extends ChangeNotifier {
   void _updateFirePits(double dt) {
     for (final pit in firePits) {
       pit.life -= dt;
+      if (pit.friendly) continue;
       if ((pit.position - player).distance <= pit.radius) {
         _hurtPlayer(pit.dps * dt, allowFractional: true);
         if (gameOver) return;
@@ -4430,13 +4672,17 @@ class SurvivalEngine extends ChangeNotifier {
       if (abilityMastered &&
           playerClass == PlayerClass.tank &&
           _shieldTimer > 0) {
-        _masteryPulseNearby(0.55, 14 + wave * 0.4);
+        _masteryPulseNearby(0.95, 55 + wave * 1.2);
       }
       return;
     }
     var incoming = amount;
     if (classMastered && playerClass == PlayerClass.tank) {
-      incoming *= 0.8;
+      incoming *= 0.5;
+      // Adamant Aegis: retaliate when struck.
+      if (_random.nextDouble() < 0.55) {
+        _masteryPulseNearby(0.7, 35 + wave * 0.8);
+      }
     }
     if (allowFractional) {
       _poisonAcc += incoming;
@@ -4448,12 +4694,14 @@ class SurvivalEngine extends ChangeNotifier {
       health = math.max(0, health - math.max(1, incoming.round()));
     }
     _damageFlash = 0.18;
+    _sfx(AudioCue.hurt);
     if (health <= 0) {
       health = 0;
       gameOver = true;
       _firing = false;
       bestWave = math.max(bestWave, wave - (waveActive ? 1 : 0));
       _recordHighScoreIfNeeded();
+      _sfx(AudioCue.gameOver);
     }
   }
 
@@ -4587,6 +4835,7 @@ class SurvivalEngine extends ChangeNotifier {
           life: 0.55,
         ));
         _showMessage('THE CITADEL BREAKS — APOCALYPSE LORD RISES');
+        _sfx(AudioCue.bossAlert);
       default:
         break;
     }
@@ -4673,31 +4922,56 @@ class SurvivalEngine extends ChangeNotifier {
       return;
     }
 
-    final freeShot = classMastered &&
-        playerClass == PlayerClass.assault &&
-        _random.nextDouble() < 0.15;
+    final freeShot = (classMastered &&
+            playerClass == PlayerClass.assault &&
+            _random.nextDouble() < 0.45) ||
+        (weaponMastered &&
+            weapon.mastery == WeaponMastery.storm &&
+            _random.nextDouble() < 0.4);
     if (!freeShot) {
       magazine[weapon] = ammo - 1;
     }
-    _shotCooldown =
+    var shotCd =
         effectiveWeaponCooldown * (_overdriveTimer > 0 ? 0.35 : 1.0);
+    if (_stormTimer > 0) shotCd *= 0.45;
+    _shotCooldown = shotCd;
+    if (weaponMastered && weapon.mastery == WeaponMastery.overheat) {
+      _weaponHeat = math.min(1.0, _weaponHeat + 0.08);
+    }
     final maxRange = weapon.range;
     final pierce = weapon.pierces ||
-        (classMastered && playerClass == PlayerClass.ranger);
+        (classMastered && playerClass == PlayerClass.ranger) ||
+        (weaponMastered &&
+            (weapon.mastery == WeaponMastery.rail ||
+                (weapon.mastery == WeaponMastery.overheat &&
+                    _weaponHeat > 0.55)));
     var blastRadius = weapon.explosionRadius;
     if (blastRadius > 0) {
       if (classMastered && playerClass == PlayerClass.demolitions) {
-        blastRadius *= 1.4;
+        blastRadius *= 2.0;
       }
-      if (weaponMastered) {
-        blastRadius *= 1.25;
+      if (weaponMastered &&
+          weapon.mastery == WeaponMastery.launcher) {
+        blastRadius *= 1.85;
+      } else if (weaponMastered && blastRadius > 0) {
+        blastRadius *= 1.35;
       }
     }
     final shotDamage = effectiveWeaponDamage.round();
     final tracerDamage =
         (effectiveWeaponDamage * _damageBuffMult).round().clamp(1, 999999);
 
-    for (var pellet = 0; pellet < weapon.pellets; pellet++) {
+    final pelletCount = weapon.pellets +
+        (weaponMastered && weapon.mastery == WeaponMastery.shotgun
+            ? 3
+            : 0) +
+        (weaponMastered &&
+                weapon.mastery == WeaponMastery.storm &&
+                _stormTimer > 0
+            ? 2
+            : 0);
+
+    for (var pellet = 0; pellet < pelletCount; pellet++) {
       final spread = (_random.nextDouble() - 0.5) * weapon.spread;
       final cosA = math.cos(spread);
       final sinA = math.sin(spread);
@@ -4760,6 +5034,22 @@ class SurvivalEngine extends ChangeNotifier {
           weapon.color,
           ignite: weapon.ignites,
         );
+        if (weaponMastered &&
+            weapon.mastery == WeaponMastery.launcher) {
+          for (final delay in [0.2, 0.4, 0.65]) {
+            final jitter = Offset(
+              (_random.nextDouble() - 0.5) * 0.7,
+              (_random.nextDouble() - 0.5) * 0.7,
+            );
+            _clusterBombs.add((
+              at: _wrap(impact + jitter),
+              timer: delay,
+              radius: blastRadius * 0.7,
+              damage: (shotDamage * 0.7).round(),
+              color: weapon.color,
+            ));
+          }
+        }
       } else {
         ({Zombie zombie, double along})? hit;
         for (final candidate in hits) {
@@ -4783,6 +5073,9 @@ class SurvivalEngine extends ChangeNotifier {
     }
 
     _cullDeadZombies();
+
+    // Per-weapon muzzle report (includes launchers / exotic blasts).
+    _sfx(AudioCue.shoot, weapon: weapon);
 
     if ((magazine[weapon] ?? 0) <= 0) {
       reload(auto: true);
@@ -4812,102 +5105,248 @@ class SurvivalEngine extends ChangeNotifier {
 
   void _applyWeaponHit(Zombie zombie) {
     if (_tryBlockDamage(zombie)) return;
+    var damageMult = _damageBuffMult;
+    if (weaponMastered &&
+        weapon.mastery == WeaponMastery.brand &&
+        _hunterMarkId == zombie.id) {
+      damageMult *= 1.9;
+    }
+    if (weaponMastered && weapon.mastery == WeaponMastery.shotgun) {
+      final dist = _wrappedDelta(player, zombie.position).distance;
+      if (dist < 0.85) {
+        damageMult *= 1.0 + (0.85 - dist) * 2.4; // up to ~3x at point blank
+      }
+    }
+    if (weaponMastered &&
+        weapon.mastery == WeaponMastery.creed &&
+        _random.nextDouble() < 0.38) {
+      damageMult *= 2.6;
+      blastFlashes.add(BlastFlash(
+        zombie.position,
+        const Color(0xFFFFF59D),
+        radius: 0.28,
+        life: 0.16,
+      ));
+    }
     final dealt =
-        effectiveWeaponDamage * _damageBuffMult * zombie.kind.damageTakenFactor;
+        effectiveWeaponDamage * damageMult * zombie.kind.damageTakenFactor;
     zombie.health -= dealt;
     zombie.hitFlash = 0.08;
     _spawnDamageFloater(zombie.position, dealt);
     _addSoulCharge(dealt);
-    if (weapon.ignites) {
+    if (weapon.ignites ||
+        (weaponMastered && weapon.mastery == WeaponMastery.inferno)) {
       _applyBurn(
         zombie,
-        duration: weaponMastered ? 4.5 : 3.5,
-        dps: weaponMastered ? 36 : 28,
+        duration: weaponMastered ? 7.0 : 3.5,
+        dps: weaponMastered ? 72 : 28,
       );
     }
     if (weapon.appliesVirus) {
       _applyVirus(
         zombie,
-        duration: weaponMastered ? 16.0 : 12.0,
-        dps: weaponMastered ? 52 : 32,
+        duration: weaponMastered ? 18.0 : 12.0,
+        dps: weaponMastered ? 70 : 32,
       );
     }
-    if (weapon.appliesSlow) {
+    if (weapon.appliesSlow ||
+        (weaponMastered && weapon.mastery == WeaponMastery.beam)) {
       _applySlow(
         zombie,
         duration: weaponMastered
-            ? 3.8
+            ? 4.5
             : (weapon.rarity.index >= WeaponRarity.legendary.index ? 3.2 : 2.4),
         factor: weaponMastered
-            ? 0.28
+            ? 0.2
             : (weapon.rarity.index >= WeaponRarity.legendary.index ? 0.35 : 0.45),
       );
     }
     if (weaponMastered) {
-      _applyWeaponMasteryHit(zombie);
+      _applyWeaponMasteryHit(zombie, dealt);
     }
   }
 
-  void _applyWeaponMasteryHit(Zombie zombie) {
-    if (weapon.explosionRadius > 0 || weapon.ignites) return;
-    if (weapon.pierces && _random.nextDouble() < 0.35) {
-      Zombie? nearest;
-      var best = 0.55;
-      for (final other in zombies) {
-        if (other.id == zombie.id) continue;
-        final d = _wrappedDelta(zombie.position, other.position).distance;
-        if (d < best) {
-          best = d;
-          nearest = other;
+  void _applyWeaponMasteryHit(Zombie zombie, double dealtDamage) {
+    switch (weapon.mastery) {
+      case WeaponMastery.ricochet:
+        // Ricochet Sovereign — bounce to up to 3 nearby foes.
+        var bounces = 0;
+        var from = zombie.position;
+        var exclude = {zombie.id};
+        while (bounces < 3) {
+          Zombie? next;
+          var best = 0.85;
+          for (final other in zombies) {
+            if (exclude.contains(other.id) || other.health <= 0) continue;
+            final d = _wrappedDelta(from, other.position).distance;
+            if (d < best) {
+              best = d;
+              next = other;
+            }
+          }
+          if (next == null || _tryBlockDamage(next)) break;
+          final chain = dealtDamage * (0.9 - bounces * 0.15);
+          next.health -= chain;
+          next.hitFlash = 0.1;
+          _spawnDamageFloater(next.position, chain);
+          tracers.add(BulletTracer(
+            from,
+            next.position,
+            weapon.color,
+            strokeWidth: 2.4,
+            life: 0.1,
+          ));
+          from = next.position;
+          exclude.add(next.id);
+          bounces++;
         }
-      }
-      if (nearest != null && !_tryBlockDamage(nearest)) {
-        final chain =
-            effectiveWeaponDamage * 0.55 * nearest.kind.damageTakenFactor;
-        nearest.health -= chain;
-        nearest.hitFlash = 0.1;
-        _spawnDamageFloater(nearest.position, chain);
+        if (zombie.health > 0 &&
+            zombie.health / zombie.maxHealth <= 0.28 &&
+            _random.nextDouble() < 0.7) {
+          zombie.health = 0;
+          blastFlashes.add(BlastFlash(
+            zombie.position,
+            const Color(0xFFFFD54F),
+            radius: 0.35,
+            life: 0.2,
+          ));
+        }
+      case WeaponMastery.storm:
+        if (_random.nextDouble() < 0.35) {
+          zombie.health -= dealtDamage * 0.55;
+          _spawnDamageFloater(zombie.position, dealtDamage * 0.55);
+        }
+      case WeaponMastery.creed:
+        if (zombie.health > 0 &&
+            zombie.health / zombie.maxHealth <= 0.32 &&
+            _random.nextDouble() < 0.65) {
+          zombie.health = 0;
+          blastFlashes.add(BlastFlash(
+            zombie.position,
+            const Color(0xFFFFECB3),
+            radius: 0.4,
+            life: 0.22,
+          ));
+        }
+      case WeaponMastery.shotgun:
+        final dist = _wrappedDelta(player, zombie.position).distance;
+        if (dist < 1.0) {
+          final shove = _wrappedDelta(player, zombie.position);
+          if (shove.distance > 0.01) {
+            final dir = shove / shove.distance;
+            zombie.position = _wrap(zombie.position + dir * 0.35);
+          }
+          _masteryPulseAt(
+            zombie.position,
+            0.55,
+            effectiveWeaponDamage * 0.75,
+          );
+        }
+      case WeaponMastery.rail:
+        _masteryPulseAt(
+          zombie.position,
+          0.65,
+          effectiveWeaponDamage * 0.9,
+        );
+        if ((zombie.kind.isBoss || zombie.kind.isMiniBoss) &&
+            zombie.health > 0 &&
+            zombie.health / zombie.maxHealth <= 0.22) {
+          zombie.health = 0;
+        }
+      case WeaponMastery.brand:
+        _hunterMarkId = zombie.id;
+        _hunterMarkTimer = 5.5;
         blastFlashes.add(BlastFlash(
-          nearest.position,
-          weapon.color,
-          radius: 0.22,
+          zombie.position,
+          const Color(0xFFFFAB40),
+          radius: 0.25,
           life: 0.15,
         ));
-      }
-      return;
-    }
-    if (weapon.appliesSlow || weapon.appliesVirus) return;
-    // Master Strike: execute low targets or splash.
-    if (zombie.health > 0 &&
-        zombie.health / zombie.maxHealth <= 0.16 &&
-        _random.nextDouble() < 0.45) {
-      zombie.health = 0;
-      blastFlashes.add(BlastFlash(
-        zombie.position,
-        const Color(0xFFFFD54F),
-        radius: 0.3,
-        life: 0.2,
-      ));
-      return;
-    }
-    if (_random.nextDouble() < 0.22) {
-      for (final other in zombies) {
-        if (other.id == zombie.id) continue;
-        if (_wrappedDelta(zombie.position, other.position).distance <= 0.42) {
-          if (_tryBlockDamage(other)) continue;
-          final splash =
-              effectiveWeaponDamage * 0.4 * other.kind.damageTakenFactor;
-          other.health -= splash;
-          other.hitFlash = 0.08;
-          _spawnDamageFloater(other.position, splash);
+      case WeaponMastery.inferno:
+        // Extra radial scorch.
+        for (final other in zombies) {
+          if (other.id == zombie.id) continue;
+          if (_wrappedDelta(zombie.position, other.position).distance > 0.4) {
+            continue;
+          }
+          _applyBurn(other, duration: 4.0, dps: 40);
         }
-      }
-      blastFlashes.add(BlastFlash(
-        zombie.position,
-        weapon.color,
-        radius: 0.4,
-        life: 0.18,
-      ));
+      case WeaponMastery.launcher:
+        // Handled via blast radius + cluster bombs in fire().
+        break;
+      case WeaponMastery.overheat:
+        if (_weaponHeat > 0.7 && _random.nextDouble() < 0.4) {
+          _masteryPulseAt(
+            zombie.position,
+            0.45,
+            effectiveWeaponDamage * 0.6,
+          );
+        }
+      case WeaponMastery.beam:
+        // Prism Cascade — chain to 3 enemies.
+        var chained = 0;
+        var fromPos = zombie.position;
+        final hitIds = {zombie.id};
+        while (chained < 3) {
+          Zombie? next;
+          var best = 1.1;
+          for (final other in zombies) {
+            if (hitIds.contains(other.id) || other.health <= 0) continue;
+            final d = _wrappedDelta(fromPos, other.position).distance;
+            if (d < best) {
+              best = d;
+              next = other;
+            }
+          }
+          if (next == null || _tryBlockDamage(next)) break;
+          final chain =
+              dealtDamage * (0.85 - chained * 0.18) * next.kind.damageTakenFactor;
+          next.health -= chain;
+          next.hitFlash = 0.1;
+          _applySlow(next, duration: 2.8, factor: 0.3);
+          _spawnDamageFloater(next.position, chain);
+          tracers.add(BulletTracer(
+            fromPos,
+            next.position,
+            weapon.color,
+            strokeWidth: 3.2,
+            life: 0.12,
+          ));
+          fromPos = next.position;
+          hitIds.add(next.id);
+          chained++;
+        }
+      case WeaponMastery.exotic:
+        final roll = _random.nextDouble();
+        if (roll < 0.34) {
+          // Void pull.
+          for (final other in zombies) {
+            final delta = _wrappedDelta(other.position, zombie.position);
+            if (delta.distance > 1.1 || delta.distance < 0.01) continue;
+            other.position = _wrap(
+              other.position + (delta / delta.distance) * 0.28,
+            );
+          }
+          blastFlashes.add(BlastFlash(
+            zombie.position,
+            const Color(0xFF7E57C2),
+            radius: 0.9,
+            life: 0.25,
+          ));
+        } else if (roll < 0.67) {
+          if (zombie.health / zombie.maxHealth <= 0.4) {
+            zombie.health = 0;
+          } else {
+            zombie.health -= dealtDamage * 1.5;
+            _spawnDamageFloater(zombie.position, dealtDamage * 1.5);
+          }
+        } else {
+          _masteryPulseAt(
+            zombie.position,
+            0.95,
+            effectiveWeaponDamage * 1.35,
+          );
+        }
     }
   }
 
@@ -4953,6 +5392,7 @@ class SurvivalEngine extends ChangeNotifier {
         life: 2.8,
         radius: math.min(0.55, radius * 0.55),
         dps: 24,
+        friendly: true,
       ));
     }
   }
@@ -4960,14 +5400,14 @@ class SurvivalEngine extends ChangeNotifier {
   void _addSoulCharge(double damage, {double mult = 1}) {
     if (playerClass != PlayerClass.reaper || damage <= 0 || gameOver) return;
     var gain = (damage * mult) / soulBarDamageNeeded;
-    if (classMastered) gain *= 1.3;
-    if (_scytheTimer > 0) gain *= 1.85;
+    if (classMastered) gain *= 1.35;
+    if (_scytheTimer > 0) gain *= 1.35;
     _soulCharge += gain;
     var surges = 0;
+    final heal = soulSurgeHealAmount;
     while (_soulCharge >= 1) {
       _soulCharge -= 1;
       surges++;
-      final heal = ((classMastered ? 36 : 26) * abilityPower).round().clamp(18, 80);
       _healFromCrate(heal);
       blastFlashes.add(BlastFlash(
         player,
@@ -4977,13 +5417,15 @@ class SurvivalEngine extends ChangeNotifier {
       ));
     }
     if (surges > 0) {
-      _showMessage(surges == 1 ? 'SOUL SURGE' : 'SOUL SURGE x$surges');
+      _showMessage(
+        surges == 1 ? 'SOUL SURGE +$heal' : 'SOUL SURGE x$surges (+$heal)',
+      );
     }
   }
 
   void _reaperOpeningCleave() {
-    final radius = 1.15 * abilityPower;
-    final dmg = 55 * abilityPower * _damageBuffMult;
+    final radius = 0.9 * abilityPower;
+    final dmg = 36 * abilityPower * _damageBuffMult;
     for (final zombie in List<Zombie>.from(zombies)) {
       if (_wrappedDelta(player, zombie.position).distance >
           radius + zombie.hitRadius) {
@@ -4993,11 +5435,11 @@ class SurvivalEngine extends ChangeNotifier {
       final dealt = dmg * zombie.kind.damageTakenFactor;
       zombie.health -= dealt;
       zombie.hitFlash = 0.14;
-      _addSoulCharge(dealt, mult: 1.5);
+      _addSoulCharge(dealt, mult: 1.2);
       final push = _wrappedDelta(player, zombie.position);
       if (push.distance > 0.001) {
         zombie.position = _wrap(
-          zombie.position + (push / push.distance) * 0.18,
+          zombie.position + (push / push.distance) * 0.14,
         );
       }
     }
@@ -5076,9 +5518,9 @@ class SurvivalEngine extends ChangeNotifier {
         ? aimDirection
         : const Offset(0, -1);
     final swingDir = _rotateOffset(facing, _scytheSwingAngle);
-    final range = 1.35 * (0.95 + abilityPower * 0.14);
+    final range = 1.15 * (0.95 + abilityPower * 0.1);
     final halfArc = -0.15;
-    final dmg = (72 + wave * 1.8) * abilityPower * _damageBuffMult;
+    final dmg = (48 + wave * 1.15) * abilityPower * _damageBuffMult;
     var hits = 0;
     for (final zombie in List<Zombie>.from(zombies)) {
       if (_scytheHitIds.contains(zombie.id)) continue;
@@ -5094,7 +5536,7 @@ class SurvivalEngine extends ChangeNotifier {
       zombie.health -= dealt;
       zombie.hitFlash = 0.14;
       _scytheHitIds.add(zombie.id);
-      _addSoulCharge(dealt, mult: 2.35);
+      _addSoulCharge(dealt, mult: 1.55);
       final shove = _rotateOffset(dir, _scytheSwingDir * 0.55);
       zombie.position = _wrap(zombie.position + shove * 0.22);
       hits++;
@@ -5143,6 +5585,7 @@ class SurvivalEngine extends ChangeNotifier {
           bossKeys++;
         }
         _showMessage('${drop.kind.label.toUpperCase()} ACQUIRED');
+        _sfx(AudioCue.pickup);
       }
     }
     keyDrops.removeWhere((d) => d.pickedUp);
@@ -5168,6 +5611,7 @@ class SurvivalEngine extends ChangeNotifier {
       }
       chest.opened = true;
       chest.respawnTimer = chest.requiredKey == KeyKind.boss ? 55 : 40;
+      _sfx(AudioCue.pickup);
       _grantPremiumLoot(
         prefix: 'CHEST',
         kind: chest.lootKind,
@@ -5252,6 +5696,7 @@ class SurvivalEngine extends ChangeNotifier {
           !crate.opened &&
           (crate.position - player).distance < 0.16) {
         crate.opened = true;
+        _sfx(AudioCue.pickup);
         switch (crate.lootKind) {
           case CrateLootKind.money:
             final amount = _crateMoneyAmount(crate.displayRarity);
@@ -5309,7 +5754,12 @@ class SurvivalEngine extends ChangeNotifier {
   }
 
   /// Money / HP crate rarity — higher tiers unlock as waves climb.
+  /// Mythic+ is intentionally scarce (separate low-odds gate).
   WeaponRarity _rollCrateRarity() {
+    final roll = _random.nextDouble();
+    if (wave >= 18 && roll < 0.012) return WeaponRarity.ascendant;
+    if (wave >= 14 && roll < 0.03) return WeaponRarity.mythic;
+
     final weighted = <WeaponRarity>[
       WeaponRarity.common,
       WeaponRarity.common,
@@ -5325,8 +5775,6 @@ class SurvivalEngine extends ChangeNotifier {
       weighted.addAll([WeaponRarity.epic, WeaponRarity.rare]);
     }
     if (wave >= 7) weighted.add(WeaponRarity.legendary);
-    if (wave >= 10) weighted.add(WeaponRarity.mythic);
-    if (wave >= 14) weighted.add(WeaponRarity.ascendant);
     return weighted[_random.nextInt(weighted.length)];
   }
 
@@ -5358,15 +5806,7 @@ class SurvivalEngine extends ChangeNotifier {
 
     final weighted = <WeaponKind>[];
     for (final kind in locked) {
-      final weight = switch (kind.rarity) {
-        WeaponRarity.common => 8,
-        WeaponRarity.uncommon => 6,
-        WeaponRarity.rare => wave >= 2 ? 4 : 1,
-        WeaponRarity.epic => wave >= 4 ? 3 : 0,
-        WeaponRarity.legendary => wave >= 7 ? 2 : 0,
-        WeaponRarity.mythic => wave >= 10 ? 1 : 0,
-        WeaponRarity.ascendant => wave >= 14 ? 1 : 0,
-      };
+      final weight = weaponDropWeight(kind);
       for (var i = 0; i < weight; i++) {
         weighted.add(kind);
       }
@@ -5375,6 +5815,64 @@ class SurvivalEngine extends ChangeNotifier {
       return locked[_random.nextInt(locked.length)];
     }
     return weighted[_random.nextInt(weighted.length)];
+  }
+
+  /// Integer bag weight for [kind] in supply-crate weapon rolls (0 = ineligible).
+  int weaponDropWeight(WeaponKind kind) => switch (kind.rarity) {
+        WeaponRarity.common => 10,
+        WeaponRarity.uncommon => 7,
+        WeaponRarity.rare => wave >= 2 ? 5 : 1,
+        WeaponRarity.epic => wave >= 4 ? 3 : 0,
+        WeaponRarity.legendary => wave >= 7 ? 2 : 0,
+        WeaponRarity.mythic => wave >= 14 ? 1 : 0,
+        WeaponRarity.ascendant => wave >= 18 ? 1 : 0,
+      };
+
+  /// Earliest wave where [kind] can appear in normal supply weapon drops.
+  int? weaponDropUnlockWave(WeaponKind kind) => switch (kind.rarity) {
+        WeaponRarity.epic => 4,
+        WeaponRarity.legendary => 7,
+        WeaponRarity.mythic => 14,
+        WeaponRarity.ascendant => 18,
+        _ => null,
+      };
+
+  /// Chance that a weapon supply crate yields [kind] (0–1).
+  ///
+  /// Owned guns are still scored as if they remained in the pool so the UI can
+  /// keep showing odds after unlock; the live roller only picks locked guns.
+  double weaponDropChance(WeaponKind kind) {
+    final pool = WeaponKind.values
+        .where((candidate) =>
+            !unlockedWeapons.contains(candidate) || candidate == kind)
+        .toList();
+    if (pool.isEmpty) return 0;
+
+    var total = 0;
+    for (final candidate in pool) {
+      total += weaponDropWeight(candidate);
+    }
+    if (total <= 0) {
+      // Fallback: equal odds among every gun in the display pool.
+      return 1.0 / pool.length;
+    }
+    return weaponDropWeight(kind) / total;
+  }
+
+  /// Short UI label for drop odds (e.g. `8% drop`, `Wave 14+`).
+  String weaponDropOddsLabel(WeaponKind kind) {
+    final unlockWave = weaponDropUnlockWave(kind);
+    if (weaponDropWeight(kind) <= 0 &&
+        unlockWave != null &&
+        wave < unlockWave) {
+      return 'Wave $unlockWave+';
+    }
+    final chance = weaponDropChance(kind);
+    if (chance <= 0) return '—';
+    final pct = chance * 100;
+    if (pct < 0.5) return '<1% drop';
+    if (pct < 10) return '${pct.toStringAsFixed(1)}% drop';
+    return '${pct.round()}% drop';
   }
 
   void togglePause() {
@@ -5396,6 +5894,12 @@ class SurvivalEngine extends ChangeNotifier {
 
   @visibleForTesting
   void debugKill(Zombie zombie) => _killZombie(zombie);
+
+  @visibleForTesting
+  void debugAddSoulCharge(double bars) {
+    if (playerClass != PlayerClass.reaper) return;
+    _addSoulCharge(bars * soulBarDamageNeeded);
+  }
 
   @visibleForTesting
   void debugGrantWeapon(WeaponKind kind) =>
@@ -5485,17 +5989,24 @@ class SurvivalEngine extends ChangeNotifier {
         : const Offset(0, -1);
     final maxRange = weapon.range;
     final pierce = weapon.pierces ||
-        (classMastered && playerClass == PlayerClass.ranger);
+        (classMastered && playerClass == PlayerClass.ranger) ||
+        (weaponMastered &&
+            (weapon.mastery == WeaponMastery.rail ||
+                (weapon.mastery == WeaponMastery.overheat &&
+                    _weaponHeat > 0.55)));
     final occluded =
         pierce ? maxRange : _rayOcclusionDistance(player, dir, maxRange);
 
     var blastRadius = weapon.explosionRadius;
     if (blastRadius > 0) {
       if (classMastered && playerClass == PlayerClass.demolitions) {
-        blastRadius *= 1.4;
+        blastRadius *= 2.0;
       }
-      if (weaponMastered) {
-        blastRadius *= 1.25;
+      if (weaponMastered &&
+          weapon.mastery == WeaponMastery.launcher) {
+        blastRadius *= 1.85;
+      } else if (weaponMastered && blastRadius > 0) {
+        blastRadius *= 1.35;
       }
     }
 

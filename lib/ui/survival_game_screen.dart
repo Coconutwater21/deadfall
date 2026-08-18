@@ -20,6 +20,7 @@ class SurvivalGameScreen extends StatefulWidget {
 class _SurvivalGameScreenState extends State<SurvivalGameScreen>
     with SingleTickerProviderStateMixin {
   late final SurvivalEngine engine;
+  late final GameAudio _audio;
   late final Ticker _ticker;
   final FocusNode _focusNode = FocusNode();
   final Set<LogicalKeyboardKey> _keys = {};
@@ -42,11 +43,27 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
     super.initState();
     engine = SurvivalEngine();
     engine.paused = true;
+    _audio = GameAudio();
+    engine.onAudioCue = (cue, {weapon}) {
+      // Fire-and-forget; never let SFX errors tear down the isolate.
+      _audio.play(cue, weapon: weapon);
+    };
     _ticker = createTicker(_tick)..start();
     engine.loadHighScores();
     _loadUiSettings();
-    WidgetsBinding.instance
-        .addPostFrameCallback((_) => _focusNode.requestFocus());
+    // Defer audio until after the first frame so the Flutter engine / plugins
+    // are fully up (avoids white-screen kills on physical iOS devices).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _focusNode.requestFocus();
+      _audio.init().then((_) {
+        if (!mounted) return;
+        _syncAudioSettings();
+        _syncMusic();
+      }).catchError((Object e, StackTrace st) {
+        debugPrint('Audio startup failed: $e\n$st');
+      });
+    });
     // Web: keep right-click for ability instead of the browser menu.
     if (kIsWeb) {
       BrowserContextMenu.disableContextMenu();
@@ -62,6 +79,35 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
       _binds = binds;
       engine.autoEquipNewWeapons = loaded.autoEquipNewWeapons;
     });
+    _syncAudioSettings();
+    _syncMusic();
+  }
+
+  void _syncAudioSettings() {
+    _audio.setMuted(_ui.muted);
+    _audio.setMusicEnabled(_ui.musicEnabled);
+    _audio.setMusicVolume(_ui.musicVolume);
+    _audio.setSfxVolume(_ui.sfxVolume);
+  }
+
+  void _syncMusic() {
+    final duck = engine.paused || _showIntro || _showSettings;
+    _audio.setPausedDuck(duck && !engine.gameOver);
+
+    final GameMusic track;
+    if (engine.gameOver || _showIntro) {
+      track = GameMusic.menu;
+    } else {
+      final elite = engine.eliteMusicTrack;
+      if (elite != GameMusic.none) {
+        track = elite;
+      } else if (engine.wave > 0 || engine.waveActive) {
+        track = GameMusic.combat;
+      } else {
+        track = GameMusic.menu;
+      }
+    }
+    _audio.setMusic(track);
   }
 
   Future<void> _persistUiSettings() async {
@@ -72,6 +118,29 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
   void _syncGameplaySettings() {
     engine.autoEquipNewWeapons = _ui.autoEquipNewWeapons;
   }
+
+  bool get _compact {
+    final size = MediaQuery.sizeOf(context);
+    return UiLayoutSettings.isCompact(size);
+  }
+
+  double get _hudScale =>
+      _ui.uiScale * UiLayoutSettings.densityFor(MediaQuery.sizeOf(context));
+
+  double get _ctrlScale =>
+      _ui.controlsScale *
+      (UiLayoutSettings.isCompact(MediaQuery.sizeOf(context)) ? 0.78 : 1.0);
+
+  // Positions come straight from saved settings so phones can customize freely.
+  double get _hudTop => _ui.hudTop;
+
+  double get _classBarTop => _ui.classBarTop;
+
+  double get _weaponBarBottom => _ui.weaponBarBottom;
+
+  double get _controlsBottom => _ui.controlsBottom;
+
+  double get _controlsSideInset => _ui.controlsSideInset;
 
   void _openSettings() {
     setState(() {
@@ -92,10 +161,11 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
 
   void _resetUiSettings() {
     setState(() {
-      _ui.reset();
+      _ui.resetFor(MediaQuery.sizeOf(context));
       _binds.reset();
       _rebindingAction = null;
       _syncGameplaySettings();
+      _syncAudioSettings();
     });
     _persistUiSettings();
   }
@@ -138,6 +208,7 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
     final dt = (elapsed - _lastTick!).inMicroseconds / 1000000;
     _lastTick = elapsed;
     engine.update(dt);
+    _syncMusic();
   }
 
   @override
@@ -151,7 +222,9 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
     _nameController.dispose();
     _weaponBarScroll.dispose();
     _classBarScroll.dispose();
+    engine.onAudioCue = null;
     engine.dispose();
+    _audio.dispose();
     super.dispose();
   }
 
@@ -305,7 +378,11 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                 builder: (context, constraints) {
                   final size =
                       Size(constraints.maxWidth, constraints.maxHeight);
-                  final projection = ArenaProjection(size, engine.player);
+                  final projection = ArenaProjection(
+                    size,
+                    engine.player,
+                    zoom: UiLayoutSettings.isCompact(size) ? 1.45 : 1,
+                  );
                   return Stack(
                     children: [
                       Positioned.fill(
@@ -399,12 +476,12 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
             : engine.weapon.color;
     final elites = _activeElites;
     return Positioned(
-      left: 14,
-      right: 14,
-      top: _ui.hudTop,
+      left: _compact ? 8 : 14,
+      right: _compact ? 8 : 14,
+      top: _hudTop,
       child: Transform.scale(
         alignment: Alignment.topCenter,
-        scale: _ui.uiScale,
+        scale: _hudScale,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -822,20 +899,32 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
   }
 
   Widget _buildClassBar() {
+    final compact = _compact;
+    final classesByPrice = PlayerClass.values.toList()
+      ..sort((a, b) {
+        final byMoney = a.moneyCost.compareTo(b.moneyCost);
+        if (byMoney != 0) return byMoney;
+        final byKills = a.killCost.compareTo(b.killCost);
+        if (byKills != 0) return byKills;
+        return a.label.compareTo(b.label);
+      });
     return Positioned(
-      left: 12,
-      right: 12,
-      top: _ui.classBarTop,
+      left: compact ? 6 : 12,
+      right: compact ? 6 : 12,
+      top: _classBarTop,
       child: Transform.scale(
         alignment: Alignment.topCenter,
-        scale: _ui.uiScale,
+        scale: _hudScale,
         // heightFactor keeps this shrink-wrapped so scale doesn't shift it.
         child: Align(
           alignment: Alignment.topCenter,
           heightFactor: 1,
           child: Container(
-          constraints: const BoxConstraints(maxWidth: 920),
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          constraints: BoxConstraints(maxWidth: compact ? 640 : 920),
+          padding: EdgeInsets.symmetric(
+            horizontal: compact ? 5 : 8,
+            vertical: compact ? 4 : 6,
+          ),
           decoration: BoxDecoration(
             color: const Color(0xCC111820),
             borderRadius: BorderRadius.circular(14),
@@ -861,7 +950,7 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                     ),
                   ),
                 ),
-                ...PlayerClass.values.map((kind) {
+                ...classesByPrice.map((kind) {
                   final unlocked = engine.unlockedClasses.contains(kind);
                   final selected = engine.playerClass == kind;
                   final canBuy = engine.canUnlockClass(kind);
@@ -871,7 +960,7 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                           ? '-'
                           : '${kind.index + 1}';
                   return Padding(
-                    padding: const EdgeInsets.only(right: 6),
+                    padding: EdgeInsets.only(right: compact ? 4 : 6),
                     child: InkWell(
                       onTap: () {
                         if (unlocked) {
@@ -883,8 +972,9 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                       borderRadius: BorderRadius.circular(10),
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 140),
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 6),
+                        padding: EdgeInsets.symmetric(
+                            horizontal: compact ? 7 : 10,
+                            vertical: compact ? 4 : 6),
                         decoration: BoxDecoration(
                           color: selected
                               ? kind.color.withValues(alpha: 0.22)
@@ -946,33 +1036,67 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                                   fontSize: 10,
                                 ),
                               ),
-                              SizedBox(
-                                width: 168,
-                                child: Text(
-                                  kind.description,
-                                  style: TextStyle(
-                                    color: Colors.white.withValues(alpha: 0.55),
-                                    fontSize: 9,
-                                    height: 1.25,
-                                  ),
-                                ),
-                              ),
-                              Padding(
-                                padding: const EdgeInsets.only(top: 3),
-                                child: SizedBox(
+                              if (!compact) ...[
+                                SizedBox(
                                   width: 168,
                                   child: Text(
-                                    '${kind.abilityName}: ${kind.abilityDescription}',
+                                    kind.description,
                                     style: TextStyle(
-                                      color: Colors.lightGreenAccent
-                                          .withValues(alpha: unlocked ? 0.85 : 0.55),
+                                      color: Colors.white.withValues(alpha: 0.55),
                                       fontSize: 9,
                                       height: 1.25,
-                                      fontWeight: FontWeight.w600,
                                     ),
                                   ),
                                 ),
-                              ),
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 3),
+                                  child: SizedBox(
+                                    width: 168,
+                                    child: Text(
+                                      '${kind.abilityName}: ${kind.abilityDescription}',
+                                      style: TextStyle(
+                                        color: Colors.lightGreenAccent
+                                            .withValues(alpha: unlocked ? 0.85 : 0.55),
+                                        fontSize: 9,
+                                        height: 1.25,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 3),
+                                  child: SizedBox(
+                                    width: 168,
+                                    child: Text(
+                                      'Class L5: ${SurvivalUpgrades.classMasteryName(kind)} — ${SurvivalUpgrades.classMasteryBlurb(kind)}',
+                                      style: TextStyle(
+                                        color: const Color(0xFFFFD54F)
+                                            .withValues(alpha: unlocked ? 0.9 : 0.55),
+                                        fontSize: 8.5,
+                                        height: 1.25,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 2),
+                                  child: SizedBox(
+                                    width: 168,
+                                    child: Text(
+                                      'Ability L5: ${SurvivalUpgrades.abilityMasteryName(kind)} — ${SurvivalUpgrades.abilityMasteryBlurb(kind)}',
+                                      style: TextStyle(
+                                        color: Colors.lightGreenAccent
+                                            .withValues(alpha: unlocked ? 0.8 : 0.5),
+                                        fontSize: 8.5,
+                                        height: 1.25,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
                               if (unlocked) ...[
                                 Padding(
                                   padding: const EdgeInsets.only(top: 4),
@@ -1272,23 +1396,24 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
 
   Widget _buildWeaponBar() {
     final unlocked = engine.unlockedSorted;
+    final compact = _compact;
     _scheduleWeaponBarScroll(engine.weapon);
     return Positioned(
-      left: 12,
-      right: 12,
-      bottom: _ui.weaponBarBottom,
+      left: compact ? 6 : 12,
+      right: compact ? 6 : 12,
+      bottom: _weaponBarBottom,
       child: Transform.scale(
         alignment: Alignment.bottomCenter,
-        scale: _ui.uiScale,
+        scale: _hudScale,
         child: Align(
           alignment: Alignment.bottomCenter,
           heightFactor: 1,
           child: Container(
-          constraints: const BoxConstraints(maxWidth: 920),
-          padding: const EdgeInsets.all(6),
+          constraints: BoxConstraints(maxWidth: compact ? 640 : 920),
+          padding: EdgeInsets.all(compact ? 4 : 6),
           decoration: BoxDecoration(
             color: const Color(0xE3111820),
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(compact ? 14 : 18),
             border: Border.all(color: Colors.white24),
             boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 20)],
           ),
@@ -1296,7 +1421,8 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
             mainAxisSize: MainAxisSize.min,
             children: [
               _buildEquippedUpgradeRow(),
-              Padding(
+              if (!compact)
+                Padding(
                 padding: const EdgeInsets.only(bottom: 4, top: 2),
                 child: Column(
                   children: [
@@ -1315,15 +1441,25 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      SurvivalUpgrades.isMastered(
-                              engine.weaponLevel(engine.weapon))
-                          ? 'Special: ${engine.weapon.specialAbility} · Mastery: ${SurvivalUpgrades.weaponMasteryBlurb(engine.weapon)}'
-                          : 'Special: ${engine.weapon.specialAbility}',
+                      'Special: ${engine.weapon.specialAbility}',
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         color: Colors.amberAccent.withValues(alpha: 0.85),
                         fontSize: 10,
                         fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      SurvivalUpgrades.isMastered(
+                              engine.weaponLevel(engine.weapon))
+                          ? 'Mastery: ${SurvivalUpgrades.weaponMasteryName(engine.weapon)} — ${SurvivalUpgrades.weaponMasteryBlurb(engine.weapon)}'
+                          : 'L5 Mastery: ${SurvivalUpgrades.weaponMasteryName(engine.weapon)} — ${SurvivalUpgrades.weaponMasteryBlurb(engine.weapon)}',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: const Color(0xFFFFD54F).withValues(alpha: 0.9),
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
                       ),
                     ),
                     if (engine.abilityUnlocked) ...[
@@ -1377,9 +1513,9 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                         padding: const EdgeInsets.symmetric(horizontal: 2),
                         child: AnimatedContainer(
                           duration: const Duration(milliseconds: 140),
-                          width: 124,
-                          padding: const EdgeInsets.symmetric(
-                              vertical: 7, horizontal: 6),
+                          width: compact ? 88 : 124,
+                          padding: EdgeInsets.symmetric(
+                              vertical: compact ? 4 : 7, horizontal: 6),
                           decoration: BoxDecoration(
                             color: selected
                                 ? kind.color.withValues(alpha: 0.22)
@@ -1407,7 +1543,7 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                                         Icon(
                                           _weaponIcon(kind),
                                           color: kind.color,
-                                          size: 22,
+                                          size: compact ? 18 : 22,
                                         ),
                                         if (level > 0)
                                           Positioned(
@@ -1455,33 +1591,72 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                                         fontWeight: FontWeight.w800,
                                       ),
                                     ),
-                                    const SizedBox(height: 2),
                                     Text(
-                                      kind.description,
-                                      textAlign: TextAlign.center,
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
+                                      engine.weaponDropOddsLabel(kind),
                                       style: TextStyle(
-                                        color: Colors.white
-                                            .withValues(alpha: 0.55),
-                                        fontSize: 8.5,
-                                        height: 1.2,
+                                        color: Colors.lightBlueAccent
+                                            .withValues(alpha: 0.95),
+                                        fontSize: 9,
+                                        fontWeight: FontWeight.w800,
                                       ),
                                     ),
-                                    const SizedBox(height: 2),
-                                    Text(
-                                      kind.specialAbility,
-                                      textAlign: TextAlign.center,
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        color: Colors.amberAccent
-                                            .withValues(alpha: 0.8),
-                                        fontSize: 8,
-                                        height: 1.2,
-                                        fontWeight: FontWeight.w600,
+                                    if (!compact) ...[
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        kind.description,
+                                        textAlign: TextAlign.center,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: Colors.white
+                                              .withValues(alpha: 0.55),
+                                          fontSize: 8.5,
+                                          height: 1.2,
+                                        ),
                                       ),
-                                    ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        kind.specialAbility,
+                                        textAlign: TextAlign.center,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: Colors.amberAccent
+                                              .withValues(alpha: 0.8),
+                                          fontSize: 8,
+                                          height: 1.2,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        '${SurvivalUpgrades.weaponMasteryName(kind)}: ${SurvivalUpgrades.weaponMasteryBlurb(kind)}',
+                                        textAlign: TextAlign.center,
+                                        maxLines: 3,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: const Color(0xFFFFD54F)
+                                              .withValues(alpha: 0.85),
+                                          fontSize: 8,
+                                          height: 1.2,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ] else ...[
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        SurvivalUpgrades.weaponMasteryName(kind),
+                                        textAlign: TextAlign.center,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: const Color(0xFFFFD54F)
+                                              .withValues(alpha: 0.85),
+                                          fontSize: 8,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ],
                                   ],
                                 ),
                               ),
@@ -1504,9 +1679,9 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                           (kind) => Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 2),
                             child: Container(
-                              width: 112,
-                              padding: const EdgeInsets.symmetric(
-                                  vertical: 7, horizontal: 6),
+                              width: compact ? 78 : 112,
+                              padding: EdgeInsets.symmetric(
+                                  vertical: compact ? 4 : 7, horizontal: 6),
                               decoration: BoxDecoration(
                                 borderRadius: BorderRadius.circular(12),
                                 border: Border.all(
@@ -1520,7 +1695,8 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
                                     Icon(Icons.lock,
-                                        color: kind.rarity.color, size: 20),
+                                        color: kind.rarity.color,
+                                        size: compact ? 16 : 20),
                                     const SizedBox(height: 2),
                                     Text(
                                       kind.label,
@@ -1539,33 +1715,72 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                                         fontWeight: FontWeight.w800,
                                       ),
                                     ),
-                                    const SizedBox(height: 2),
                                     Text(
-                                      kind.description,
-                                      textAlign: TextAlign.center,
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
+                                      engine.weaponDropOddsLabel(kind),
                                       style: TextStyle(
-                                        color:
-                                            Colors.white.withValues(alpha: 0.5),
-                                        fontSize: 8.5,
-                                        height: 1.2,
+                                        color: Colors.lightBlueAccent
+                                            .withValues(alpha: 0.95),
+                                        fontSize: 9,
+                                        fontWeight: FontWeight.w800,
                                       ),
                                     ),
-                                    const SizedBox(height: 2),
-                                    Text(
-                                      kind.specialAbility,
-                                      textAlign: TextAlign.center,
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        color: Colors.amberAccent
-                                            .withValues(alpha: 0.55),
-                                        fontSize: 8,
-                                        height: 1.2,
-                                        fontWeight: FontWeight.w600,
+                                    if (!compact) ...[
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        kind.description,
+                                        textAlign: TextAlign.center,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color:
+                                              Colors.white.withValues(alpha: 0.5),
+                                          fontSize: 8.5,
+                                          height: 1.2,
+                                        ),
                                       ),
-                                    ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        kind.specialAbility,
+                                        textAlign: TextAlign.center,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: Colors.amberAccent
+                                              .withValues(alpha: 0.55),
+                                          fontSize: 8,
+                                          height: 1.2,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        '${SurvivalUpgrades.weaponMasteryName(kind)}: ${SurvivalUpgrades.weaponMasteryBlurb(kind)}',
+                                        textAlign: TextAlign.center,
+                                        maxLines: 3,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: const Color(0xFFFFD54F)
+                                              .withValues(alpha: 0.7),
+                                          fontSize: 8,
+                                          height: 1.2,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ] else ...[
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        SurvivalUpgrades.weaponMasteryName(kind),
+                                        textAlign: TextAlign.center,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: const Color(0xFFFFD54F)
+                                              .withValues(alpha: 0.7),
+                                          fontSize: 8,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ],
                                   ],
                                 ),
                               ),
@@ -1621,86 +1836,60 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
     );
   }
 
-  IconData _weaponIcon(WeaponKind kind) => switch (kind) {
-        WeaponKind.pistol ||
-        WeaponKind.dualPistols =>
-          Icons.ads_click,
-        WeaponKind.revolver || WeaponKind.leverAction => Icons.adjust,
-        WeaponKind.smg || WeaponKind.pdw => Icons.graphic_eq,
-        WeaponKind.machinePistol || WeaponKind.nailgun => Icons.touch_app,
-        WeaponKind.carbine ||
-        WeaponKind.assaultRifle ||
-        WeaponKind.battleRifle ||
-        WeaponKind.pulseRifle =>
-          Icons.my_location,
-        WeaponKind.pepperbox ||
-        WeaponKind.shotgun ||
-        WeaponKind.combatShotgun ||
-        WeaponKind.autoShotgun =>
-          Icons.flash_on,
-        WeaponKind.burstCarbine || WeaponKind.shredder => Icons.more_horiz,
-        WeaponKind.sniper ||
-        WeaponKind.marksmanRifle ||
-        WeaponKind.phantomBow =>
-          Icons.center_focus_strong,
-        WeaponKind.crossbow || WeaponKind.harpoonGun => Icons.arrow_forward,
-        WeaponKind.flamethrower || WeaponKind.dragonBreath =>
-          Icons.local_fire_department,
-        WeaponKind.iceRifle || WeaponKind.cryoCannon => Icons.ac_unit,
-        WeaponKind.toxinSprayer || WeaponKind.blowdart => Icons.science,
-        WeaponKind.minigun || WeaponKind.arcCaster => Icons.blur_circular,
-        WeaponKind.railgun ||
-        WeaponKind.gaussRifle ||
-        WeaponKind.prismLance ||
-        WeaponKind.eternityRail =>
-          Icons.bolt,
-        WeaponKind.plasmaCannon ||
-        WeaponKind.singularity ||
-        WeaponKind.oblivionCaster =>
-          Icons.bubble_chart,
-        WeaponKind.grenadeLauncher ||
-        WeaponKind.rocketPod ||
-        WeaponKind.clusterLauncher ||
-        WeaponKind.novaStorm ||
-        WeaponKind.rpg =>
-          Icons.sports_baseball,
-        WeaponKind.laserLance || WeaponKind.solarBeam => Icons.wb_sunny,
-        WeaponKind.thunderCannon || WeaponKind.stormCaller =>
-          Icons.thunderstorm,
-        WeaponKind.voidCannon || WeaponKind.apocalypseCannon =>
-          Icons.nightlight_round,
-        WeaponKind.starSplitter ||
-        WeaponKind.genesisBlaster ||
-        WeaponKind.worldEnder =>
-          Icons.auto_awesome,
+  IconData _weaponIcon(WeaponKind kind) => switch (kind.symbol) {
+        WeaponSymbol.sidearm => Icons.ads_click,
+        WeaponSymbol.revolver => Icons.adjust,
+        WeaponSymbol.smg => Icons.graphic_eq,
+        WeaponSymbol.machinePistol => Icons.touch_app,
+        WeaponSymbol.rifle => Icons.my_location,
+        WeaponSymbol.shotgun => Icons.flash_on,
+        WeaponSymbol.burst => Icons.more_horiz,
+        WeaponSymbol.marksman => Icons.center_focus_strong,
+        WeaponSymbol.crossbow => Icons.arrow_forward,
+        WeaponSymbol.flamer => Icons.local_fire_department,
+        WeaponSymbol.cryo => Icons.ac_unit,
+        WeaponSymbol.toxin => Icons.science,
+        WeaponSymbol.minigun => Icons.blur_circular,
+        WeaponSymbol.rail => Icons.bolt,
+        WeaponSymbol.plasma => Icons.bubble_chart,
+        WeaponSymbol.launcher => Icons.sports_baseball,
+        WeaponSymbol.beam => Icons.wb_sunny,
+        WeaponSymbol.thunder => Icons.thunderstorm,
+        WeaponSymbol.voidCore => Icons.nightlight_round,
+        WeaponSymbol.star => Icons.auto_awesome,
       };
 
   Widget _buildMobileControls() {
+    final compact = _compact;
+    final stick = compact ? 92.0 : 118.0;
+    final sideBtn = compact ? 42.0 : 52.0;
+    final fireBtn = compact ? 56.0 : 68.0;
+    final gap = compact ? 7.0 : 10.0;
     return Positioned(
-      left: _ui.controlsSideInset,
-      right: _ui.controlsSideInset,
-      bottom: _ui.controlsBottom,
+      left: _controlsSideInset,
+      right: _controlsSideInset,
+      bottom: _controlsBottom,
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           Transform.scale(
             alignment: Alignment.bottomLeft,
-            scale: _ui.controlsScale,
+            scale: _ctrlScale,
             child: _VirtualJoystick(
-              size: 118,
+              size: stick,
               onChanged: _setJoystick,
             ),
           ),
           const Spacer(),
           Transform.scale(
             alignment: Alignment.bottomRight,
-            scale: _ui.controlsScale,
+            scale: _ctrlScale,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 _HoldButton(
                   icon: Icons.flash_on,
-                  size: 52,
+                  size: sideBtn,
                   color: engine.abilityReady
                       ? Colors.lightGreenAccent
                       : Colors.cyanAccent,
@@ -1708,19 +1897,19 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                     if (held) engine.activateAbility();
                   },
                 ),
-                const SizedBox(height: 10),
+                SizedBox(height: gap),
                 _HoldButton(
                   icon: Icons.replay,
-                  size: 52,
+                  size: sideBtn,
                   color: Colors.amberAccent,
                   onHold: (held) {
                     if (held) engine.reload();
                   },
                 ),
-                const SizedBox(height: 10),
+                SizedBox(height: gap),
                 _HoldButton(
                   icon: Icons.gps_fixed,
-                  size: 68,
+                  size: fireBtn,
                   color: Colors.redAccent,
                   onHold: (held) {
                     if (held) engine.aimAtNearest();
@@ -1776,7 +1965,7 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
               const SizedBox(height: 16),
               Text(
                 'Only the Necromancer and his thralls remain.\n'
-                'Twenty seconds of quiet…\n'
+                'Two seconds of quiet…\n'
                 'then the ritual completes.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
@@ -1827,18 +2016,27 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
   }
 
   Widget _buildIntro() {
+    final compact = _compact;
     return Positioned.fill(
       child: Container(
         color: Colors.black.withValues(alpha: 0.78),
         alignment: Alignment.center,
         child: Container(
-          width: 520,
-          constraints: const BoxConstraints(maxWidth: 560, maxHeight: 640),
-          margin: const EdgeInsets.symmetric(horizontal: 20),
-          padding: const EdgeInsets.fromLTRB(28, 26, 28, 24),
+          width: compact ? 420 : 520,
+          constraints: BoxConstraints(
+            maxWidth: compact ? 460 : 560,
+            maxHeight: compact ? 520 : 640,
+          ),
+          margin: EdgeInsets.symmetric(horizontal: compact ? 12 : 20),
+          padding: EdgeInsets.fromLTRB(
+            compact ? 16 : 28,
+            compact ? 16 : 26,
+            compact ? 16 : 28,
+            compact ? 14 : 24,
+          ),
           decoration: BoxDecoration(
             color: const Color(0xFF111820),
-            borderRadius: BorderRadius.circular(22),
+            borderRadius: BorderRadius.circular(compact ? 16 : 22),
             border: Border.all(
               color: Colors.cyanAccent.withValues(alpha: 0.65),
               width: 2,
@@ -1854,22 +2052,23 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Row(
+              Row(
                 children: [
-                  Icon(Icons.sports_esports, color: Colors.cyanAccent, size: 32),
-                  SizedBox(width: 12),
+                  Icon(Icons.sports_esports,
+                      color: Colors.cyanAccent, size: compact ? 24 : 32),
+                  SizedBox(width: compact ? 8 : 12),
                   Text(
                     'HOW TO PLAY',
                     style: TextStyle(
                       color: Colors.cyanAccent,
-                      fontSize: 26,
+                      fontSize: compact ? 20 : 26,
                       fontWeight: FontWeight.w900,
                       letterSpacing: 2,
                     ),
                   ),
                 ],
               ),
-              const SizedBox(height: 14),
+              SizedBox(height: compact ? 8 : 14),
               Flexible(
                 child: SingleChildScrollView(
                   child: Column(
@@ -1915,7 +2114,7 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                         Icons.groups,
                         'Classes',
                         'Hotkeys 1–9 / 0 / - · ${_bindLabel(GameAction.cycleClass)} cycles unlocked · '
-                        'Reaper fills a Soul Bar with damage for heal/overheal; Soul Scythe is a big melee cleave',
+                        'Reaper Soul Bar fills from damage and drains over time — full bars heal a flat amount by Reaper level (can overheal); Soul Scythe is a big melee cleave',
                       ),
                       _introLine(
                         Icons.settings,
@@ -2171,17 +2370,31 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
   }
 
   Widget _buildSettingsOverlay() {
+    final compact = _compact;
+    final density = UiLayoutSettings.densityFor(MediaQuery.sizeOf(context));
     return Positioned.fill(
       child: Container(
-        color: Colors.black.withValues(alpha: 0.78),
+        color: Colors.black.withValues(alpha: 0.55),
         alignment: Alignment.center,
         child: Container(
-          width: 420,
-          constraints: const BoxConstraints(maxHeight: 700),
-          padding: const EdgeInsets.fromLTRB(22, 20, 22, 18),
+          width: compact ? double.infinity : 420,
+          constraints: BoxConstraints(
+            maxWidth: compact ? 520 : 420,
+            maxHeight: compact ? MediaQuery.sizeOf(context).height * 0.92 : 700,
+          ),
+          margin: EdgeInsets.symmetric(
+            horizontal: compact ? 10 : 0,
+            vertical: compact ? 8 : 0,
+          ),
+          padding: EdgeInsets.fromLTRB(
+            compact ? 14 : 22,
+            compact ? 14 : 20,
+            compact ? 14 : 22,
+            compact ? 12 : 18,
+          ),
           decoration: BoxDecoration(
-            color: const Color(0xFF111820),
-            borderRadius: BorderRadius.circular(22),
+            color: const Color(0xFF111820).withValues(alpha: 0.78),
+            borderRadius: BorderRadius.circular(compact ? 16 : 22),
             border: Border.all(
               color: Colors.amberAccent.withValues(alpha: 0.55),
               width: 2,
@@ -2206,11 +2419,13 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                 ],
               ),
               const SizedBox(height: 6),
-              const Align(
+              Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
-                  'Adjust size and position. Changes save automatically.',
-                  style: TextStyle(color: Colors.white54, fontSize: 12),
+                  compact
+                      ? 'Phone layout — drag sliders to resize and move HUD / sticks. Saves automatically.'
+                      : 'Adjust size and position. Changes save automatically.',
+                  style: const TextStyle(color: Colors.white54, fontSize: 12),
                 ),
               ),
               const SizedBox(height: 12),
@@ -2223,7 +2438,9 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                         value: _ui.uiScale,
                         min: UiLayoutSettings.uiScaleMin,
                         max: UiLayoutSettings.uiScaleMax,
-                        display: '${(_ui.uiScale * 100).round()}%',
+                        display: density < 1
+                            ? '${(_ui.uiScale * 100).round()}% → ${(_hudScale * 100).round()}%'
+                            : '${(_ui.uiScale * 100).round()}%',
                         onChanged: (v) => setState(() => _ui.uiScale = v),
                       ),
                       _settingsSlider(
@@ -2231,7 +2448,9 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                         value: _ui.controlsScale,
                         min: UiLayoutSettings.controlsScaleMin,
                         max: UiLayoutSettings.controlsScaleMax,
-                        display: '${(_ui.controlsScale * 100).round()}%',
+                        display: compact
+                            ? '${(_ui.controlsScale * 100).round()}% → ${(_ctrlScale * 100).round()}%'
+                            : '${(_ui.controlsScale * 100).round()}%',
                         onChanged: (v) =>
                             setState(() => _ui.controlsScale = v),
                       ),
@@ -2246,7 +2465,7 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                       _settingsSlider(
                         label: 'Class bar position',
                         value: _ui.classBarTop,
-                        min: 40,
+                        min: 20,
                         max: 160,
                         display: '${_ui.classBarTop.round()}',
                         onChanged: (v) => setState(() => _ui.classBarTop = v),
@@ -2263,7 +2482,7 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                       _settingsSlider(
                         label: 'Controls height',
                         value: _ui.controlsBottom,
-                        min: 80,
+                        min: 40,
                         max: 280,
                         display: '${_ui.controlsBottom.round()}',
                         onChanged: (v) =>
@@ -2279,6 +2498,33 @@ class _SurvivalGameScreenState extends State<SurvivalGameScreen>
                             setState(() => _ui.controlsSideInset = v),
                       ),
                       const SizedBox(height: 8),
+                      _settingsSlider(
+                        label: 'Music volume',
+                        value: _ui.musicVolume,
+                        min: 0,
+                        max: 1,
+                        display: '${(_ui.musicVolume * 100).round()}%',
+                        onChanged: (v) {
+                          setState(() {
+                            _ui.musicVolume = v;
+                            _ui.musicEnabled = v > 0.001;
+                            _syncAudioSettings();
+                          });
+                        },
+                      ),
+                      _settingsSlider(
+                        label: 'Sound effects volume',
+                        value: _ui.sfxVolume,
+                        min: 0,
+                        max: 1,
+                        display: '${(_ui.sfxVolume * 100).round()}%',
+                        onChanged: (v) {
+                          setState(() {
+                            _ui.sfxVolume = v;
+                            _syncAudioSettings();
+                          });
+                        },
+                      ),
                       SwitchListTile.adaptive(
                         contentPadding: EdgeInsets.zero,
                         title: const Text(
@@ -3096,9 +3342,12 @@ class _HoldButton extends StatelessWidget {
 }
 
 class ArenaProjection {
-  ArenaProjection(this.size, this.camera)
-      : scale = math.min(size.width, size.height) /
-            (SurvivalEngine.arenaHalf * 0.55),
+  ArenaProjection(
+    this.size,
+    this.camera, {
+    double zoom = 1,
+  })  : scale = math.min(size.width, size.height) /
+            (SurvivalEngine.arenaHalf * 0.55 / zoom.clamp(0.5, 2.5)),
         center = Offset(size.width / 2, size.height * 0.49);
 
   final Size size;
@@ -5295,24 +5544,24 @@ class SurvivalPainter extends CustomPainter {
     final face = screenDir.distance < 1e-5
         ? const Offset(1, 0)
         : screenDir / screenDir.distance;
-    final length = math.max(14.0, bolt.radius * projection.scale * 5.5);
-    final width = math.max(5.0, bolt.radius * projection.scale * 1.8);
+    final length = math.max(9.0, bolt.radius * projection.scale * 3.6);
+    final width = math.max(2.8, bolt.radius * projection.scale * 1.15);
     final tip = p + face * length * 0.45;
     final tail = p - face * length * 0.55;
     final perp = Offset(-face.dy, face.dx);
 
     // Exhaust trail
     canvas.drawCircle(
-      tail - face * 4,
-      width * 1.4,
+      tail - face * 2.5,
+      width * 1.15,
       Paint()
-        ..color = const Color(0x88FF6D00)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6),
+        ..color = const Color(0x66FF6D00)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4),
     );
     canvas.drawCircle(
-      tail - face * 2,
-      width * 0.7,
-      Paint()..color = const Color(0xCCFFEE58),
+      tail - face * 1.2,
+      width * 0.55,
+      Paint()..color = const Color(0xAAFFEE58),
     );
 
     final body = Path()
@@ -5341,7 +5590,7 @@ class SurvivalPainter extends CustomPainter {
           ],
         ).createShader(Rect.fromPoints(tip, tail)),
     );
-    canvas.drawCircle(tip, width * 0.35, Paint()..color = Colors.white);
+    canvas.drawCircle(tip, width * 0.3, Paint()..color = Colors.white);
   }
 
   void _paintFireballBolt(Canvas canvas, EnemyBolt bolt, Offset p) {
@@ -6754,6 +7003,18 @@ class SurvivalPainter extends CustomPainter {
     final width = projection.scale * 0.1;
     final height = width * 0.68;
     final box = Rect.fromCenter(center: center, width: width, height: height);
+    final rarityColor = crate.displayRarity.color;
+    final rarityDark = Color.lerp(rarityColor, Colors.black, 0.45)!;
+    final rarityLight = Color.lerp(rarityColor, Colors.white, 0.35)!;
+
+    // Soft rarity beacon so drops read from farther away.
+    canvas.drawCircle(
+      ground,
+      width * (crate.height > 0.12 ? 1.35 : 1.05),
+      Paint()
+        ..color = rarityColor.withValues(alpha: 0.22)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8),
+    );
 
     if (crate.height > 0.12) {
       final chuteCenter = center - Offset(0, width * 1.08);
@@ -6767,39 +7028,48 @@ class SurvivalPainter extends CustomPainter {
         math.pi,
         math.pi,
         true,
-        Paint()..color = const Color(0xFFE8E2C4),
+        Paint()
+          ..shader = LinearGradient(
+            colors: [rarityLight, rarityColor, rarityDark],
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+          ).createShader(chute),
+      );
+      canvas.drawArc(
+        chute,
+        math.pi,
+        math.pi,
+        false,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.6
+          ..color = rarityLight.withValues(alpha: 0.9),
       );
       final ropes = Paint()
-        ..color = Colors.white54
-        ..strokeWidth = 1;
+        ..color = rarityLight.withValues(alpha: 0.75)
+        ..strokeWidth = 1.2;
       canvas.drawLine(
           chuteCenter + Offset(-width * 0.88, 0), box.topLeft, ropes);
       canvas.drawLine(
           chuteCenter + Offset(width * 0.88, 0), box.topRight, ropes);
-      canvas.drawLine(ground, center, Paint()..color = Colors.white12);
+      canvas.drawLine(
+        ground,
+        center,
+        Paint()..color = rarityColor.withValues(alpha: 0.28),
+      );
     }
-
-    final rarityColor = crate.displayRarity.color;
-    final colors = switch (crate.lootKind) {
-      CrateLootKind.money => [
-          Color.lerp(const Color(0xFFFFB52E), rarityColor, 0.55)!,
-          Color.lerp(const Color(0xFF9D4E16), rarityColor, 0.35)!,
-        ],
-      CrateLootKind.health => [
-          Color.lerp(const Color(0xFF81C784), rarityColor, 0.5)!,
-          Color.lerp(const Color(0xFF2E7D32), rarityColor, 0.35)!,
-        ],
-      CrateLootKind.weapon => [
-          rarityColor,
-          Color.lerp(rarityColor, Colors.black, 0.45)!,
-        ],
-    };
 
     canvas.drawRRect(
       RRect.fromRectAndRadius(box, const Radius.circular(4)),
       Paint()
+        ..color = rarityColor.withValues(alpha: 0.35)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6),
+    );
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(box, const Radius.circular(4)),
+      Paint()
         ..shader = LinearGradient(
-          colors: colors,
+          colors: [rarityLight, rarityColor, rarityDark],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ).createShader(box),
@@ -6808,21 +7078,14 @@ class SurvivalPainter extends CustomPainter {
       RRect.fromRectAndRadius(box, const Radius.circular(4)),
       Paint()
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 3
-        ..color = const Color(0xFF4E2A14),
+        ..strokeWidth = 2.4
+        ..color = rarityDark,
     );
-    canvas.drawLine(
-        box.topLeft,
-        box.bottomRight,
-        Paint()
-          ..color = const Color(0xFF5E341B)
-          ..strokeWidth = 3);
-    canvas.drawLine(
-        box.topRight,
-        box.bottomLeft,
-        Paint()
-          ..color = const Color(0xFF5E341B)
-          ..strokeWidth = 3);
+    final strap = Paint()
+      ..color = rarityDark.withValues(alpha: 0.85)
+      ..strokeWidth = 2.4;
+    canvas.drawLine(box.topLeft, box.bottomRight, strap);
+    canvas.drawLine(box.topRight, box.bottomLeft, strap);
   }
 
   void _paintTracers(Canvas canvas) {

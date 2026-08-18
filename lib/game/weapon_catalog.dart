@@ -253,6 +253,81 @@ extension WeaponStats on WeaponKind {
         WeaponBodyStyle.beam => const Color(0xFF006064),
         WeaponBodyStyle.exotic => const Color(0xFF4A148C),
       };
+
+  /// UI arsenal symbol — weapons sharing a symbol share a mastery.
+  WeaponSymbol get symbol => switch (this) {
+        WeaponKind.pistol || WeaponKind.dualPistols => WeaponSymbol.sidearm,
+        WeaponKind.revolver || WeaponKind.leverAction => WeaponSymbol.revolver,
+        WeaponKind.smg || WeaponKind.pdw => WeaponSymbol.smg,
+        WeaponKind.machinePistol || WeaponKind.nailgun =>
+          WeaponSymbol.machinePistol,
+        WeaponKind.carbine ||
+        WeaponKind.assaultRifle ||
+        WeaponKind.battleRifle ||
+        WeaponKind.pulseRifle =>
+          WeaponSymbol.rifle,
+        WeaponKind.pepperbox ||
+        WeaponKind.shotgun ||
+        WeaponKind.combatShotgun ||
+        WeaponKind.autoShotgun =>
+          WeaponSymbol.shotgun,
+        WeaponKind.burstCarbine || WeaponKind.shredder => WeaponSymbol.burst,
+        WeaponKind.sniper ||
+        WeaponKind.marksmanRifle ||
+        WeaponKind.phantomBow =>
+          WeaponSymbol.marksman,
+        WeaponKind.crossbow || WeaponKind.harpoonGun => WeaponSymbol.crossbow,
+        WeaponKind.flamethrower || WeaponKind.dragonBreath =>
+          WeaponSymbol.flamer,
+        WeaponKind.iceRifle || WeaponKind.cryoCannon => WeaponSymbol.cryo,
+        WeaponKind.toxinSprayer || WeaponKind.blowdart => WeaponSymbol.toxin,
+        WeaponKind.minigun || WeaponKind.arcCaster => WeaponSymbol.minigun,
+        WeaponKind.railgun ||
+        WeaponKind.gaussRifle ||
+        WeaponKind.prismLance ||
+        WeaponKind.eternityRail =>
+          WeaponSymbol.rail,
+        WeaponKind.plasmaCannon ||
+        WeaponKind.singularity ||
+        WeaponKind.oblivionCaster =>
+          WeaponSymbol.plasma,
+        WeaponKind.grenadeLauncher ||
+        WeaponKind.rocketPod ||
+        WeaponKind.clusterLauncher ||
+        WeaponKind.novaStorm ||
+        WeaponKind.rpg =>
+          WeaponSymbol.launcher,
+        WeaponKind.laserLance || WeaponKind.solarBeam => WeaponSymbol.beam,
+        WeaponKind.thunderCannon || WeaponKind.stormCaller =>
+          WeaponSymbol.thunder,
+        WeaponKind.voidCannon || WeaponKind.apocalypseCannon =>
+          WeaponSymbol.voidCore,
+        WeaponKind.starSplitter ||
+        WeaponKind.genesisBlaster ||
+        WeaponKind.worldEnder =>
+          WeaponSymbol.star,
+      };
+
+  /// Mastery effect family — derived from [symbol] so matching icons match.
+  WeaponMastery get mastery => switch (symbol) {
+        WeaponSymbol.sidearm || WeaponSymbol.revolver => WeaponMastery.ricochet,
+        WeaponSymbol.smg ||
+        WeaponSymbol.machinePistol ||
+        WeaponSymbol.burst =>
+          WeaponMastery.storm,
+        WeaponSymbol.rifle => WeaponMastery.creed,
+        WeaponSymbol.shotgun => WeaponMastery.shotgun,
+        WeaponSymbol.marksman || WeaponSymbol.rail => WeaponMastery.rail,
+        WeaponSymbol.crossbow || WeaponSymbol.toxin => WeaponMastery.brand,
+        WeaponSymbol.flamer => WeaponMastery.inferno,
+        WeaponSymbol.cryo || WeaponSymbol.beam => WeaponMastery.beam,
+        WeaponSymbol.minigun => WeaponMastery.overheat,
+        WeaponSymbol.launcher || WeaponSymbol.thunder => WeaponMastery.launcher,
+        WeaponSymbol.plasma ||
+        WeaponSymbol.voidCore ||
+        WeaponSymbol.star =>
+          WeaponMastery.exotic,
+      };
 }
 
 enum WeaponBodyStyle {
@@ -265,6 +340,45 @@ enum WeaponBodyStyle {
   flamer,
   launcher,
   minigun,
+  beam,
+  exotic,
+}
+
+/// Arsenal tile icon groups.
+enum WeaponSymbol {
+  sidearm,
+  revolver,
+  smg,
+  machinePistol,
+  rifle,
+  shotgun,
+  burst,
+  marksman,
+  crossbow,
+  flamer,
+  cryo,
+  toxin,
+  minigun,
+  rail,
+  plasma,
+  launcher,
+  beam,
+  thunder,
+  voidCore,
+  star,
+}
+
+/// Shared mastery effect keyed by [WeaponKind.symbol].
+enum WeaponMastery {
+  ricochet,
+  storm,
+  creed,
+  shotgun,
+  rail,
+  brand,
+  inferno,
+  launcher,
+  overheat,
   beam,
   exotic,
 }

@@ -116,41 +116,7 @@ class SurvivalWorldBuilder {
     final houses = <House>[];
     final chests = <TreasureChest>[];
 
-    // Weighted toward Old Town street dressing.
-    const townWeighted = <PropKind>[
-      PropKind.barrel,
-      PropKind.barrel,
-      PropKind.barrel,
-      PropKind.lampPost,
-      PropKind.lampPost,
-      PropKind.crateStack,
-      PropKind.crateStack,
-      PropKind.cart,
-      PropKind.well,
-      PropKind.rock,
-      PropKind.rubble,
-      PropKind.pillar,
-      PropKind.rubble,
-    ];
-
-    for (var i = 0; i < 48; i++) {
-      final pos = _safePoint(minCenter: 1.35);
-      if (_tooClose(pos, props.map((p) => p.position), 0.4)) continue;
-      final kind = townWeighted[random.nextInt(townWeighted.length)];
-      final radius = switch (kind) {
-        PropKind.rock => 0.14 + random.nextDouble() * 0.08,
-        PropKind.crateStack => 0.12 + random.nextDouble() * 0.05,
-        PropKind.rubble => 0.11 + random.nextDouble() * 0.06,
-        PropKind.pillar => 0.1 + random.nextDouble() * 0.04,
-        PropKind.barrel => 0.09 + random.nextDouble() * 0.04,
-        PropKind.lampPost => 0.07 + random.nextDouble() * 0.03,
-        PropKind.well => 0.15 + random.nextDouble() * 0.04,
-        PropKind.cart => 0.13 + random.nextDouble() * 0.05,
-      };
-      props.add(SolidProp(pos, radius: radius, kind: kind));
-    }
-
-    // Houses in four map quadrants, each with a keyed chest inside.
+    // Houses first so obstacle placement can keep clear of them.
     final houseCenters = <Offset>[
       Offset(-arenaHalf * 0.45, -arenaHalf * 0.4),
       Offset(arenaHalf * 0.42, -arenaHalf * 0.38),
@@ -173,54 +139,53 @@ class SurvivalWorldBuilder {
       ));
     }
 
-    // Keep house interiors clear of rubble.
-    props.removeWhere((prop) {
-      for (final house in houses) {
-        if (house.outer.inflate(0.2).contains(prop.position)) return true;
-      }
-      return false;
-    });
+    // Weighted toward Old Town street dressing.
+    const townWeighted = <PropKind>[
+      PropKind.barrel,
+      PropKind.barrel,
+      PropKind.barrel,
+      PropKind.lampPost,
+      PropKind.lampPost,
+      PropKind.crateStack,
+      PropKind.crateStack,
+      PropKind.cart,
+      PropKind.well,
+      PropKind.rock,
+      PropKind.rubble,
+      PropKind.pillar,
+      PropKind.rubble,
+    ];
 
-    // Cluster a few barrels near each house porch for market feel.
-    for (final house in houses) {
-      final porch = _doorOutward(house) * 0.55;
-      for (var n = 0; n < 2; n++) {
-        final jitter = Offset(
-          (random.nextDouble() - 0.5) * 0.45,
-          (random.nextDouble() - 0.5) * 0.45,
-        );
-        final pos = house.center + porch + jitter;
-        if (pos.distance < 1.1) continue;
-        if (_tooClose(pos, props.map((p) => p.position), 0.32)) continue;
-        props.add(SolidProp(
-          pos,
-          radius: 0.09 + random.nextDouble() * 0.03,
-          kind: n == 0 ? PropKind.barrel : PropKind.crateStack,
-        ));
-      }
-      // Lamp by the door.
-      final lampPos = house.center +
-          _doorOutward(house) * 0.72 +
-          _doorTangent(house) * (0.28 + random.nextDouble() * 0.1);
-      if (!_tooClose(lampPos, props.map((p) => p.position), 0.28)) {
-        props.add(SolidProp(lampPos, radius: 0.08, kind: PropKind.lampPost));
-      }
+    for (var i = 0; i < 48; i++) {
+      final pos = _safePoint(minCenter: 1.35);
+      if (_tooClose(pos, props.map((p) => p.position), 0.4)) continue;
+      if (_nearHouse(pos, houses)) continue;
+      final kind = townWeighted[random.nextInt(townWeighted.length)];
+      final radius = switch (kind) {
+        PropKind.rock => 0.14 + random.nextDouble() * 0.08,
+        PropKind.crateStack => 0.12 + random.nextDouble() * 0.05,
+        PropKind.rubble => 0.11 + random.nextDouble() * 0.06,
+        PropKind.pillar => 0.1 + random.nextDouble() * 0.04,
+        PropKind.barrel => 0.09 + random.nextDouble() * 0.04,
+        PropKind.lampPost => 0.07 + random.nextDouble() * 0.03,
+        PropKind.well => 0.15 + random.nextDouble() * 0.04,
+        PropKind.cart => 0.13 + random.nextDouble() * 0.05,
+      };
+      props.add(SolidProp(pos, radius: radius, kind: kind));
     }
 
     return (props: props, houses: houses, chests: chests);
   }
 
-  Offset _doorOutward(House house) => switch (house.doorSide) {
-        0 => const Offset(0, -1),
-        1 => const Offset(1, 0),
-        2 => const Offset(0, 1),
-        _ => const Offset(-1, 0),
-      };
+  /// Clear house footprints plus a yard buffer around walls/doors.
+  static const houseClearance = 0.85;
 
-  Offset _doorTangent(House house) => switch (house.doorSide) {
-        0 || 2 => const Offset(1, 0),
-        _ => const Offset(0, 1),
-      };
+  bool _nearHouse(Offset pos, List<House> houses) {
+    for (final house in houses) {
+      if (house.outer.inflate(houseClearance).contains(pos)) return true;
+    }
+    return false;
+  }
 
   Offset _safePoint({required double minCenter}) {
     final pad = arenaHalf - 1.1;

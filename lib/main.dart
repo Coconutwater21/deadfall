@@ -4,6 +4,10 @@ import 'ui/survival_game_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    debugPrint('FlutterError: ${details.exceptionAsString()}');
+  };
   runApp(const DeadfallApp());
 }
 

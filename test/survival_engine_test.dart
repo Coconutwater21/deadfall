@@ -55,6 +55,35 @@ void main() {
     expect(engine.kills, 3);
   });
 
+  test('weapon drop chances sum to 1 among locked guns', () {
+    final engine = SurvivalEngine(random: Random(11));
+    engine.debugAdvanceToWave(20);
+
+    final locked = WeaponKind.values
+        .where((k) => !engine.unlockedWeapons.contains(k))
+        .toList();
+    expect(locked, isNotEmpty);
+
+    var sum = 0.0;
+    for (final kind in locked) {
+      final chance = engine.weaponDropChance(kind);
+      expect(chance, greaterThan(0));
+      expect(engine.weaponDropOddsLabel(kind), contains('%'));
+      sum += chance;
+    }
+    expect(sum, closeTo(1.0, 1e-9));
+
+    // Owned guns still show drop odds (scored as if they stayed in the pool).
+    expect(engine.weaponDropChance(WeaponKind.pistol), greaterThan(0));
+    expect(engine.weaponDropOddsLabel(WeaponKind.pistol), contains('%'));
+
+    final early = SurvivalEngine(random: Random(12));
+    expect(early.wave, lessThan(4));
+    final epic = WeaponKind.values.firstWhere((k) => k.rarity == WeaponRarity.epic);
+    expect(early.weaponDropWeight(epic), 0);
+    expect(early.weaponDropOddsLabel(epic), 'Wave 4+');
+  });
+
   test('weapon rarities are balanced and expanded', () {
     expect(WeaponRarity.ascendant.label, 'Ascendant');
     expect(WeaponKind.values.length, greaterThanOrEqualTo(45));
@@ -209,6 +238,14 @@ void main() {
     engine.fire();
     expect(target.isBurning || neighbor.isBurning, isTrue);
     expect(engine.firePits, isNotEmpty);
+    expect(engine.firePits.every((p) => p.friendly), isTrue);
+    final hp = engine.health;
+    engine.zombies.clear();
+    engine.player = engine.firePits.first.position;
+    for (var i = 0; i < 20; i++) {
+      engine.update(0.05);
+    }
+    expect(engine.health, hp);
 
     engine.zombies
       ..clear()
@@ -376,6 +413,84 @@ void main() {
     expect(near.health, lessThan(200));
   });
 
+  test('weapon mastery follows arsenal symbol', () {
+    expect(
+      SurvivalUpgrades.weaponMasteryName(WeaponKind.pistol),
+      'Ricochet Sovereign',
+    );
+    expect(
+      SurvivalUpgrades.weaponMasteryName(WeaponKind.dualPistols),
+      SurvivalUpgrades.weaponMasteryName(WeaponKind.pistol),
+    );
+    expect(
+      SurvivalUpgrades.weaponMasteryName(WeaponKind.pepperbox),
+      SurvivalUpgrades.weaponMasteryName(WeaponKind.shotgun),
+    );
+    expect(
+      SurvivalUpgrades.weaponMasteryName(WeaponKind.phantomBow),
+      SurvivalUpgrades.weaponMasteryName(WeaponKind.sniper),
+    );
+    expect(
+      SurvivalUpgrades.weaponMasteryName(WeaponKind.rpg),
+      'Apocalypse Core',
+    );
+    expect(
+      SurvivalUpgrades.weaponMasteryName(WeaponKind.worldEnder),
+      'Reality Fracture',
+    );
+    // Every weapon sharing a symbol shares a mastery.
+    final bySymbol = <WeaponSymbol, Set<WeaponMastery>>{};
+    for (final kind in WeaponKind.values) {
+      bySymbol.putIfAbsent(kind.symbol, () => {}).add(kind.mastery);
+    }
+    for (final entry in bySymbol.entries) {
+      expect(entry.value.length, 1, reason: '${entry.key} mixed masteries');
+    }
+  });
+
+  test('pistol mastery ricochets on hit', () {
+    final engine = SurvivalEngine(random: Random(91));
+    engine.waveActive = false;
+    engine.nextWaveTimer = 999;
+    engine.zombies.clear();
+    engine.props.clear();
+    engine.houses.clear();
+    engine.money = 200000;
+    engine.kills = 20000;
+    engine.unlockedWeapons.add(WeaponKind.pistol);
+    engine.equip(WeaponKind.pistol);
+    for (var i = 0; i < SurvivalUpgrades.maxLevel; i++) {
+      engine.upgradeWeapon(WeaponKind.pistol);
+    }
+    expect(engine.weaponMastered, isTrue);
+
+    final primary = Zombie(
+      id: 9101,
+      kind: ZombieKind.walker,
+      position: const Offset(0.5, 0),
+      health: 400,
+      maxHealth: 400,
+      speed: 0,
+      reward: 1,
+    );
+    final secondary = Zombie(
+      id: 9102,
+      kind: ZombieKind.walker,
+      position: const Offset(0.75, 0),
+      health: 400,
+      maxHealth: 400,
+      speed: 0,
+      reward: 1,
+    );
+    engine.zombies.addAll([primary, secondary]);
+    engine.player = Offset.zero;
+    engine.setAim(const Offset(1, 0));
+    engine.magazine[WeaponKind.pistol] = 12;
+    engine.fire();
+    expect(primary.health, lessThan(400));
+    expect(secondary.health, lessThan(400));
+  });
+
   test('mini-boss every 5 waves and citadel every 10', () {
     final engine = SurvivalEngine(random: Random(22));
     engine.debugAdvanceToWave(5);
@@ -518,6 +633,18 @@ void main() {
         engine.houses.any((h) => h.inner.contains(chest.position)),
         isTrue,
       );
+    }
+    // Obstacles stay out of house footprints and yards.
+    for (final prop in engine.props) {
+      for (final house in engine.houses) {
+        expect(
+          house.outer
+              .inflate(SurvivalWorldBuilder.houseClearance)
+              .contains(prop.position),
+          isFalse,
+          reason: 'prop ${prop.kind} spawned too close to a house',
+        );
+      }
     }
 
     engine.waveActive = false;
@@ -1381,6 +1508,9 @@ void main() {
     engine.debugSpawnRegular(ZombieKind.walker);
     engine.zombies.single.position = const Offset(1.5, 0);
     engine.player = Offset.zero;
+    // Keep the debug walker as the only threat (no wave respawn mid-test).
+    engine.waveActive = true;
+    engine.nextWaveTimer = 99;
     expect(engine.activateAbility(), isTrue);
     expect(engine.gunAllies.length, greaterThanOrEqualTo(3));
     // Spawned toward the nearest enemy (on +x from the commander).
@@ -1388,10 +1518,45 @@ void main() {
       expect(ally.position.dx, greaterThan(0.3));
     }
     final hp = engine.zombies.single.health;
+    var damaged = false;
     for (var i = 0; i < 40; i++) {
       engine.update(0.05);
+      if (engine.zombies.isEmpty ||
+          engine.zombies.single.health < hp) {
+        damaged = true;
+        break;
+      }
     }
-    expect(engine.zombies.single.health, lessThan(hp));
+    expect(damaged, isTrue);
+  });
+
+  test('commander gunline reorients toward nearest enemy', () {
+    final engine = SurvivalEngine(random: Random(74));
+    engine.money = 99999;
+    engine.kills = 999;
+    engine.unlockClass(PlayerClass.commander);
+    engine.unlockAbility(PlayerClass.commander);
+    engine.selectClass(PlayerClass.commander);
+    engine.zombies.clear();
+    engine.debugSpawnRegular(ZombieKind.walker);
+    engine.zombies.single.position = const Offset(1.5, 0);
+    engine.player = Offset.zero;
+    engine.waveActive = true;
+    engine.nextWaveTimer = 99;
+    expect(engine.activateAbility(), isTrue);
+    for (final ally in engine.gunAllies) {
+      expect(ally.formationOffset.dx, greaterThan(0.3));
+    }
+
+    // Move the threat above the commander — the line should pivot to face it.
+    engine.zombies.single.position = const Offset(0, -1.5);
+    for (var i = 0; i < 12; i++) {
+      engine.update(0.05);
+    }
+    for (final ally in engine.gunAllies) {
+      expect(ally.formationOffset.dy, lessThan(-0.3));
+      expect(ally.position.dy, lessThan(-0.2));
+    }
   });
 
   test('commander gunners take damage and can die', () {
@@ -1511,23 +1676,23 @@ void main() {
     expect(HighScoreStore.sanitizeName(''), 'Anonymous');
   });
 
-  test('necro bad ending triggers after 20s solo then ascends', () {
+  test('necro bad ending triggers after 2s solo then ascends', () {
     final engine = SurvivalEngine(random: Random(404));
     engine.debugSetupNecroBadEndingSolo();
     engine.player = const Offset(2.8, 2.8);
     engine.health = 50000;
     expect(engine.badEndingCutscene, isFalse);
 
-    // 19s is not enough.
-    for (var i = 0; i < 380; i++) {
+    // 1.5s is not enough.
+    for (var i = 0; i < 30; i++) {
       engine.update(0.05);
     }
     expect(engine.gameOver, isFalse);
-    expect(engine.debugNecroSoloTimer, greaterThan(18));
+    expect(engine.debugNecroSoloTimer, greaterThan(1.4));
     expect(engine.badEndingCutscene, isFalse);
 
-    // Cross 20s.
-    for (var i = 0; i < 50; i++) {
+    // Cross 2s.
+    for (var i = 0; i < 20; i++) {
       if (engine.badEndingCutscene) break;
       engine.update(0.05);
     }
@@ -1594,13 +1759,42 @@ void main() {
       }
     }
     expect(engine.soulCharge, greaterThan(before));
-    for (var i = 0; i < 30; i++) {
-      engine.fire();
-      for (var s = 0; s < 10; s++) {
-        engine.update(0.04);
-      }
+  });
+
+  test('reaper soul bar drains over time and heals by class level', () {
+    final engine = SurvivalEngine(random: Random(78));
+    engine.waveActive = false;
+    engine.nextWaveTimer = 999;
+    engine.money = 99999;
+    engine.kills = 999;
+    expect(engine.unlockClass(PlayerClass.reaper), isTrue);
+    engine.selectClass(PlayerClass.reaper);
+    for (var i = 0; i < 3; i++) {
+      engine.upgradeClass(PlayerClass.reaper);
     }
-    expect(engine.health, greaterThanOrEqualTo(PlayerClass.reaper.maxHealth));
+    expect(engine.classLevel(PlayerClass.reaper), 3);
+    expect(engine.soulSurgeHealAmount, 54); // 18 + 3*12
+
+    engine.health = 40;
+    // Force a full soul surge via enough charge.
+    engine.debugAddSoulCharge(1.0);
+    expect(engine.health, 40 + 54);
+
+    // At full HP, surges still push into overheal.
+    engine.health = engine.maxHealth;
+    engine.debugAddSoulCharge(1.0);
+    expect(engine.health, greaterThan(engine.maxHealth));
+    expect(engine.health, engine.maxHealth + 54);
+
+    engine.debugAddSoulCharge(0.5);
+    final charged = engine.soulCharge;
+    expect(charged, greaterThan(0.4));
+    // update() clamps dt to 0.05 — need ~7s of drain to empty 0.5 charge.
+    for (var i = 0; i < 160; i++) {
+      engine.update(0.05);
+    }
+    expect(engine.soulCharge, lessThan(charged));
+    expect(engine.soulCharge, lessThan(0.05));
   });
 
   test('missileer fires player-speed homing missile; dies with firer', () {
@@ -1625,10 +1819,10 @@ void main() {
     expect(missile.style, EnemyBoltStyle.missile);
     expect(missile.ownerId, firer.id);
 
-    // Matches player move speed (no buffs/goo in this setup).
+    // Slightly under player move speed so strafing works.
     expect(
       missile.velocity.distance,
-      closeTo(engine.effectiveMoveSpeed, 0.05),
+      closeTo(engine.effectiveMoveSpeed * 0.82, 0.05),
     );
 
     // Killing the firer removes the missile without damaging the player.
@@ -1656,7 +1850,7 @@ void main() {
       velocity: Offset.zero,
       damage: 20,
       color: const Color(0xFFFF8F00),
-      radius: 0.055,
+      radius: 0.032,
       life: 5,
       style: EnemyBoltStyle.missile,
       ownerId: firer.id,
@@ -1665,6 +1859,42 @@ void main() {
     engine.update(0.05);
     expect(engine.health, lessThan(hp));
     expect(engine.enemyBolts, isEmpty);
+  });
+
+  test('missileer missile dies on solid cover', () {
+    final engine = SurvivalEngine(random: Random(83));
+    engine.zombies.clear();
+    engine.enemyBolts.clear();
+    engine.props.clear();
+    engine.houses.clear();
+    engine.player = const Offset(5, 0);
+    engine.health = 50000;
+    engine.waveActive = false;
+    engine.nextWaveTimer = 999;
+    engine.debugSpawnRegular(ZombieKind.missileer);
+    final firer = engine.zombies.single;
+    firer.abilityCooldown = 999;
+    engine.props.add(SolidProp(
+      const Offset(0.2, 0),
+      radius: 0.2,
+      kind: PropKind.rock,
+    ));
+    engine.enemyBolts.add(EnemyBolt(
+      position: Offset.zero,
+      velocity: const Offset(2.5, 0),
+      damage: 20,
+      color: const Color(0xFFFF8F00),
+      radius: 0.032,
+      life: 5,
+      style: EnemyBoltStyle.missile,
+      ownerId: firer.id,
+    ));
+    final hp = engine.health;
+    for (var i = 0; i < 20 && engine.enemyBolts.isNotEmpty; i++) {
+      engine.update(0.05);
+    }
+    expect(engine.enemyBolts, isEmpty);
+    expect(engine.health, hp);
   });
 
   test('blazeburst first spawns as mini-boss on wave 15', () {

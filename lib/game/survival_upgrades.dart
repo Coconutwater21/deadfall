@@ -71,78 +71,103 @@ abstract final class SurvivalUpgrades {
 
   /// Max-level class passive name.
   static String classMasteryName(PlayerClass kind) => switch (kind) {
-        PlayerClass.survivor => 'Second Wind',
-        PlayerClass.scout => 'Afterimage',
-        PlayerClass.tank => 'Bulwark Plate',
-        PlayerClass.assault => 'Free Fire',
-        PlayerClass.berserker => 'Frenzy',
-        PlayerClass.reaper => 'Soul Reservoir',
-        PlayerClass.demolitions => 'Bigger Booms',
-        PlayerClass.ghost => 'Fade Reload',
-        PlayerClass.juggernaut => 'Quake Step',
-        PlayerClass.ranger => 'Through-Shot',
-        PlayerClass.commander => 'Squad Lead',
+        PlayerClass.survivor => 'Phoenix Protocol',
+        PlayerClass.scout => 'Phantom Stride',
+        PlayerClass.tank => 'Adamant Aegis',
+        PlayerClass.assault => 'Bottomless Mag',
+        PlayerClass.berserker => 'Blood Sovereign',
+        PlayerClass.reaper => 'Soul Tyrant',
+        PlayerClass.demolitions => 'Cataclysm',
+        PlayerClass.ghost => 'Living Shadow',
+        PlayerClass.juggernaut => 'Earthquake Heart',
+        PlayerClass.ranger => 'Deadeye Pierce',
+        PlayerClass.commander => 'War Marshal',
       };
 
   static String classMasteryBlurb(PlayerClass kind) => switch (kind) {
-        PlayerClass.survivor => 'Kills heal you',
-        PlayerClass.scout => 'Kills grant a speed burst',
-        PlayerClass.tank => 'Take less damage',
-        PlayerClass.assault => 'Shots can cost no ammo',
-        PlayerClass.berserker => 'Low HP deals more damage',
-        PlayerClass.reaper => 'Soul Bar fills faster and heals more',
-        PlayerClass.demolitions => 'Explosions hit a wider area',
-        PlayerClass.ghost => 'Reloading phases you briefly',
-        PlayerClass.juggernaut => 'Periodic quake pulses',
-        PlayerClass.ranger => 'Your gun always pierces',
-        PlayerClass.commander => 'Helpers fire faster',
+        PlayerClass.survivor =>
+            'Kills restore a huge chunk of HP (can overheal)',
+        PlayerClass.scout =>
+            'Kills grant a long speed surge + brief invulnerability',
+        PlayerClass.tank => 'Take half damage and pulse back when hit',
+        PlayerClass.assault => 'Most shots cost no ammo',
+        PlayerClass.berserker => 'Below 60% HP deal double damage',
+        PlayerClass.reaper => 'Souls fill faster; surges heal a bit more',
+        PlayerClass.demolitions => 'Explosions become enormous',
+        PlayerClass.ghost => 'Reloading phases you for a long window',
+        PlayerClass.juggernaut => 'Frequent devastating quake pulses',
+        PlayerClass.ranger => 'Always pierces and deals bonus damage',
+        PlayerClass.commander => 'Gunline fires extremely fast',
       };
 
   /// Max-level ability bonus name (extra effect on cast).
   static String abilityMasteryName(PlayerClass kind) => switch (kind) {
-        PlayerClass.survivor => 'Rally Pulse',
-        PlayerClass.scout => 'Blade Dash',
-        PlayerClass.tank => 'Reprise Slam',
-        PlayerClass.assault => 'Hot Swap',
-        PlayerClass.berserker => 'Blood Pact',
-        PlayerClass.reaper => 'Reaper\'s Wake',
-        PlayerClass.demolitions => 'Twin Charges',
-        PlayerClass.ghost => 'Rift Slash',
-        PlayerClass.juggernaut => 'Aftershock',
-        PlayerClass.ranger => 'Frost Mark',
-        PlayerClass.commander => 'Elite Rifles',
+        PlayerClass.survivor => 'Nova Rally',
+        PlayerClass.scout => 'Guillotine Dash',
+        PlayerClass.tank => 'Seismic Reprise',
+        PlayerClass.assault => 'Full Auto Reset',
+        PlayerClass.berserker => 'Crimson Ascension',
+        PlayerClass.reaper => 'Harvest Apocalypse',
+        PlayerClass.demolitions => 'Triple Payload',
+        PlayerClass.ghost => 'Rift Guillotine',
+        PlayerClass.juggernaut => 'Tectonic Aftershock',
+        PlayerClass.ranger => 'Glacial Erasure',
+        PlayerClass.commander => 'Death Squad',
       };
 
   static String abilityMasteryBlurb(PlayerClass kind) => switch (kind) {
-        PlayerClass.survivor => 'Also pulses nearby damage',
-        PlayerClass.scout => 'Dash cuts through enemies',
-        PlayerClass.tank => 'Second shove also damages',
-        PlayerClass.assault => 'Also reloads your mag',
-        PlayerClass.berserker => 'Also heals on rage',
-        PlayerClass.reaper => 'Longer scythe + opening cleave',
-        PlayerClass.demolitions => 'Throws a second charge',
-        PlayerClass.ghost => 'Phase path damages enemies',
-        PlayerClass.juggernaut => 'A delayed second quake',
-        PlayerClass.ranger => 'Beam chills every target',
-        PlayerClass.commander => 'Helpers deal bonus damage',
+        PlayerClass.survivor => 'Huge heal + massive damage nova',
+        PlayerClass.scout => 'Dash obliterates everything in the path',
+        PlayerClass.tank => 'Both shoves deal heavy damage',
+        PlayerClass.assault => 'Full reload + longer overdrive',
+        PlayerClass.berserker => 'Huge heal and stronger rage',
+        PlayerClass.reaper => 'Longer scythe + opening wipe cleave',
+        PlayerClass.demolitions => 'Three overlapping satchel blasts',
+        PlayerClass.ghost => 'Phase path deals lethal damage',
+        PlayerClass.juggernaut => 'Delayed second quake nearly as strong',
+        PlayerClass.ranger => 'Beam freezes and shreds every target',
+        PlayerClass.commander => 'Five elite gunners with huge HP',
       };
 
-  /// Max-level weapon special name.
-  static String weaponMasteryName(WeaponKind kind) {
-    if (kind.explosionRadius > 0) return 'Blast Core';
-    if (kind.ignites) return 'Inferno Tip';
-    if (kind.appliesSlow) return 'Deep Freeze';
-    if (kind.appliesVirus) return 'Plague Vector';
-    if (kind.pierces) return 'Chain Pierce';
-    return 'Master Strike';
-  }
+  /// Max-level weapon special — keyed off the arsenal symbol / mastery family.
+  static String weaponMasteryName(WeaponKind kind) =>
+      switch (kind.mastery) {
+        WeaponMastery.ricochet => 'Ricochet Sovereign',
+        WeaponMastery.storm => 'Bullet Storm',
+        WeaponMastery.creed => 'Killshot Creed',
+        WeaponMastery.shotgun => 'Point-Blank Tyrant',
+        WeaponMastery.rail => 'Rail Judgment',
+        WeaponMastery.brand => 'Hunter\'s Brand',
+        WeaponMastery.inferno => 'Eternal Inferno',
+        WeaponMastery.launcher => 'Apocalypse Core',
+        WeaponMastery.overheat => 'Overheat Fury',
+        WeaponMastery.beam => 'Prism Cascade',
+        WeaponMastery.exotic => 'Reality Fracture',
+      };
 
-  static String weaponMasteryBlurb(WeaponKind kind) {
-    if (kind.explosionRadius > 0) return 'Bigger blast radius';
-    if (kind.ignites) return 'Kills leave fire pits';
-    if (kind.appliesSlow) return 'Stronger, longer chill';
-    if (kind.appliesVirus) return 'Longer, hungrier virus';
-    if (kind.pierces) return 'Hits can chain nearby';
-    return 'Chance to execute or splash';
-  }
+  static String weaponMasteryBlurb(WeaponKind kind) =>
+      switch (kind.mastery) {
+        WeaponMastery.ricochet =>
+            'Shots ricochet to nearby foes and execute the wounded',
+        WeaponMastery.storm =>
+            'Free bullets + kill-triggered fire-rate frenzy',
+        WeaponMastery.creed =>
+            'Frequent critical hits and low-HP executions',
+        WeaponMastery.shotgun =>
+            'Close range deals crushing bonus damage + knockback',
+        WeaponMastery.rail =>
+            'Always pierces; hits detonate past the target',
+        WeaponMastery.brand =>
+            'Marks prey for massive bonus damage',
+        WeaponMastery.inferno =>
+            'Infernal burns and huge fire pits on kill',
+        WeaponMastery.launcher =>
+            'Gigantic blasts with delayed cluster bombs',
+        WeaponMastery.overheat =>
+            'Heat builds into piercing mega-damage',
+        WeaponMastery.beam =>
+            'Chains across multiple enemies and chills them',
+        WeaponMastery.exotic =>
+            'Random void pull, execute, or nova on hit',
+      };
 }

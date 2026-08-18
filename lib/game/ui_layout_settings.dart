@@ -1,3 +1,5 @@
+import 'dart:ui' show Size;
+
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Player-tunable HUD / touch-control layout, saved across sessions.
@@ -11,6 +13,10 @@ class UiLayoutSettings {
     this.controlsSideInset = 15,
     this.controlsScale = 1,
     this.autoEquipNewWeapons = false,
+    this.musicEnabled = true,
+    this.muted = false,
+    this.musicVolume = 1,
+    this.sfxVolume = 1,
   });
 
   double uiScale;
@@ -22,11 +28,34 @@ class UiLayoutSettings {
   double controlsScale;
   /// When true, unlocking or upgrading a gun from loot equips it immediately.
   bool autoEquipNewWeapons;
+  /// When false, background music is silenced (SFX still play).
+  bool musicEnabled;
+  bool muted;
+  double musicVolume;
+  double sfxVolume;
 
   static const uiScaleMin = 0.75;
-  static const uiScaleMax = 1.4;
+  static const uiScaleMax = 1.6;
   static const controlsScaleMin = 0.7;
-  static const controlsScaleMax = 1.5;
+  static const controlsScaleMax = 1.8;
+
+  /// Narrow phone / side-panel viewports need a denser HUD.
+  static bool isCompact(Size size) =>
+      size.width < 740 || size.shortestSide < 640;
+
+  /// Soft density so phones start readable; player sliders still scale on top.
+  static double densityFor(Size size) => isCompact(size) ? 0.68 : 1.0;
+
+  /// Phone-friendly layout used by Reset on compact screens.
+  void applyCompactDefaults() {
+    uiScale = 1;
+    hudTop = 8;
+    classBarTop = 40;
+    weaponBarBottom = 8;
+    controlsBottom = 96;
+    controlsSideInset = 10;
+    controlsScale = 1;
+  }
 
   UiLayoutSettings copy() => UiLayoutSettings(
         uiScale: uiScale,
@@ -37,6 +66,10 @@ class UiLayoutSettings {
         controlsSideInset: controlsSideInset,
         controlsScale: controlsScale,
         autoEquipNewWeapons: autoEquipNewWeapons,
+        musicEnabled: musicEnabled,
+        muted: muted,
+        musicVolume: musicVolume,
+        sfxVolume: sfxVolume,
       );
 
   void reset() {
@@ -48,6 +81,17 @@ class UiLayoutSettings {
     controlsSideInset = 15;
     controlsScale = 1;
     autoEquipNewWeapons = false;
+    musicEnabled = true;
+    muted = false;
+    musicVolume = 1;
+    sfxVolume = 1;
+  }
+
+  void resetFor(Size size) {
+    reset();
+    if (isCompact(size)) {
+      applyCompactDefaults();
+    }
   }
 
   static const _prefix = 'survival_ui_';
@@ -64,6 +108,10 @@ class UiLayoutSettings {
       controlsScale: prefs.getDouble('${_prefix}controlsScale') ?? 1,
       autoEquipNewWeapons:
           prefs.getBool('${_prefix}autoEquipNewWeapons') ?? false,
+      musicEnabled: prefs.getBool('${_prefix}musicEnabled') ?? true,
+      muted: prefs.getBool('${_prefix}muted') ?? false,
+      musicVolume: prefs.getDouble('${_prefix}musicVolume') ?? 1,
+      sfxVolume: prefs.getDouble('${_prefix}sfxVolume') ?? 1,
     );
   }
 
@@ -77,5 +125,9 @@ class UiLayoutSettings {
     await prefs.setDouble('${_prefix}controlsSideInset', controlsSideInset);
     await prefs.setDouble('${_prefix}controlsScale', controlsScale);
     await prefs.setBool('${_prefix}autoEquipNewWeapons', autoEquipNewWeapons);
+    await prefs.setBool('${_prefix}musicEnabled', musicEnabled);
+    await prefs.setBool('${_prefix}muted', muted);
+    await prefs.setDouble('${_prefix}musicVolume', musicVolume);
+    await prefs.setDouble('${_prefix}sfxVolume', sfxVolume);
   }
 }

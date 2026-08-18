@@ -60,7 +60,7 @@ extension PlayerClassStats on PlayerClass {
         PlayerClass.berserker =>
           'Near-scout speed with better HP than Scout. Aggressive skirmisher.',
         PlayerClass.reaper =>
-          'Damage fills a Soul Bar. Full bars grant heal/overheal; ability summons a massive scythe.',
+          'Damage fills a Soul Bar that drains over time. Full bars heal a flat amount (scales with Reaper level, can overheal); ability summons a massive scythe.',
         PlayerClass.demolitions =>
           'Sturdy and deliberate. Best when fighting up close to packs.',
         PlayerClass.ghost =>
@@ -79,7 +79,7 @@ extension PlayerClassStats on PlayerClass {
         PlayerClass.tank => 145,
         PlayerClass.assault => 120,
         PlayerClass.berserker => 85,
-        PlayerClass.reaper => 115,
+        PlayerClass.reaper => 100,
         PlayerClass.demolitions => 130,
         PlayerClass.ghost => 60,
         PlayerClass.juggernaut => 200,
@@ -93,7 +93,7 @@ extension PlayerClassStats on PlayerClass {
         PlayerClass.tank => 1.18,
         PlayerClass.assault => 1.05,
         PlayerClass.berserker => 1.28,
-        PlayerClass.reaper => 1.05,
+        PlayerClass.reaper => 0.98,
         PlayerClass.demolitions => 0.88,
         PlayerClass.ghost => 1.48,
         PlayerClass.juggernaut => 0.55,
@@ -121,7 +121,7 @@ extension PlayerClassStats on PlayerClass {
         PlayerClass.tank => 680,
         PlayerClass.assault => 320,
         PlayerClass.berserker => 450,
-        PlayerClass.reaper => 380,
+        PlayerClass.reaper => 700,
         PlayerClass.demolitions => 390,
         PlayerClass.ghost => 480,
         PlayerClass.juggernaut => 560,
@@ -135,7 +135,7 @@ extension PlayerClassStats on PlayerClass {
         PlayerClass.tank => 16,
         PlayerClass.assault => 7,
         PlayerClass.berserker => 10,
-        PlayerClass.reaper => 8,
+        PlayerClass.reaper => 99,
         PlayerClass.demolitions => 8,
         PlayerClass.ghost => 11,
         PlayerClass.juggernaut => 12,
@@ -193,7 +193,7 @@ extension PlayerClassStats on PlayerClass {
         PlayerClass.tank => 75,
         PlayerClass.assault => 55,
         PlayerClass.berserker => 60,
-        PlayerClass.reaper => 52,
+        PlayerClass.reaper => 520,
         PlayerClass.demolitions => 55,
         PlayerClass.ghost => 65,
         PlayerClass.juggernaut => 70,
@@ -207,7 +207,7 @@ extension PlayerClassStats on PlayerClass {
         PlayerClass.tank => 12,
         PlayerClass.assault => 12,
         PlayerClass.berserker => 13,
-        PlayerClass.reaper => 14,
+        PlayerClass.reaper => 16,
         PlayerClass.demolitions => 11,
         PlayerClass.ghost => 9,
         PlayerClass.juggernaut => 12,
@@ -255,7 +255,7 @@ enum ZombieKind {
   boltSlinger,
   toxinDart,
   zapper,
-  /// Fires a player-speed homing missile that only dies on explode or firer death.
+  /// Fires a small, weakly-homing missile that dies on solids, impact, or firer death.
   missileer,
   // Mini-bosses (every 5 waves, not multiples of 10)
   siegeBehemoth,
